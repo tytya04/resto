@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 700px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .header {
+            background-color: #2196F3;
+            color: white;
+            padding: 20px;
+            text-align: center;
+            border-radius: 5px 5px 0 0;
+        }
+        .content {
+            background-color: #f9f9f9;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 0 0 5px 5px;
+        }
+        .order-info {
+            background-color: white;
+            padding: 15px;
+            border: 1px solid #e0e0e0;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+        .items-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background-color: white;
+        }
+        .items-table th {
+            background-color: #f5f5f5;
+            padding: 10px;
+            text-align: left;
+            border: 1px solid #ddd;
+        }
+        .items-table td {
+            padding: 8px;
+            border: 1px solid #ddd;
+        }
+        .total-row {
+            font-weight: bold;
+            background-color: #f5f5f5;
+        }
+        .button {
+            display: inline-block;
+            padding: 12px 24px;
+            background-color: #2196F3;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin-top: 20px;
+            font-weight: bold;
+        }
+        .urgent {
+            background-color: #ff5722;
+            color: white;
+            padding: 5px 10px;
+            border-radius: 3px;
+            font-size: 12px;
+        }
+        .footer {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+            text-align: center;
+            font-size: 12px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h2>🆕 Новая заявка #{{orderNumber}}</h2>
+        <span class="urgent">ТРЕБУЕТ ОБРАБОТКИ</span>
+    </div>
+    
+    <div class="content">
+        <div class="order-info">
+            <h3>Информация о заказе:</h3>
+            <table width="100%">
+                <tr>
+                    <td><strong>Ресторан:</strong></td>
+                    <td>{{restaurantName}}</td>
+                </tr>
+                <tr>
+                    <td><strong>Заказал:</strong></td>
+                    <td>{{userName}}</td>
+                </tr>
+                <tr>
+                    <td><strong>Дата и время:</strong></td>
+                    <td>{{formatDate createdAt}} в {{formatTime createdAt}}</td>
+                </tr>
+                <tr>
+                    <td><strong>Позиций:</strong></td>
+                    <td>{{itemsCount}}</td>
+                </tr>
+                <tr>
+                    <td><strong>Сумма:</strong></td>
+                    <td><strong>{{totalAmount}}</strong></td>
+                </tr>
+            </table>
+        </div>
+        
+        <h3>Позиции заказа:</h3>
+        <table class="items-table">
+            <thead>
+                <tr>
+                    <th>№</th>
+                    <th>Наименование</th>
+                    <th>Количество</th>
+                    <th>Ед.</th>
+                    <th>Цена</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{#each items}}
+                <tr>
+                    <td>{{@index}}</td>
+                    <td>{{name}}</td>
+                    <td>{{quantity}}</td>
+                    <td>{{unit}}</td>
+                    <td>{{price}}</td>
+                </tr>
+                {{/each}}
+            </tbody>
+        </table>
+        
+        <div style="text-align: center; margin-top: 30px;">
+            <p><strong>Для обработки заказа используйте Telegram бот</strong></p>
+            <p>Команда: <code>/process_order_{{orderNumber}}</code></p>
+        </div>
+    </div>
+    
+    <div class="footer">
+        <p>Это автоматическое уведомление от системы управления закупками.</p>
+        <p>Пожалуйста, обработайте заказ в течение рабочего дня.</p>
+    </div>
+</body>
+</html>

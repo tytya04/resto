@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>ТОРГ-12 №{{documentNumber}} от {{documentDate}}</title>
+    <style>
+        @page {
+            size: A4 landscape;
+            margin: 10mm;
+        }
+        
+        body {
+            font-family: Arial, sans-serif;
+            font-size: 10pt;
+            margin: 0;
+            padding: 0;
+        }
+        
+        .header {
+            text-align: right;
+            margin-bottom: 10px;
+        }
+        
+        .title {
+            text-align: center;
+            font-weight: bold;
+            font-size: 14pt;
+            margin: 20px 0;
+        }
+        
+        .info-table {
+            width: 100%;
+            margin-bottom: 20px;
+        }
+        
+        .info-table td {
+            padding: 5px;
+            vertical-align: top;
+        }
+        
+        .main-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }
+        
+        .main-table th,
+        .main-table td {
+            border: 1px solid #000;
+            padding: 3px 5px;
+            text-align: center;
+            font-size: 9pt;
+        }
+        
+        .main-table th {
+            background-color: #f0f0f0;
+            font-weight: bold;
+        }
+        
+        .main-table .text-left {
+            text-align: left;
+        }
+        
+        .main-table .text-right {
+            text-align: right;
+        }
+        
+        .totals {
+            margin: 20px 0;
+        }
+        
+        .signatures {
+            margin-top: 40px;
+        }
+        
+        .signature-block {
+            display: inline-block;
+            width: 45%;
+            vertical-align: top;
+        }
+        
+        .signature-line {
+            display: inline-block;
+            width: 200px;
+            border-bottom: 1px solid #000;
+            margin: 0 10px;
+        }
+        
+        .stamp-place {
+            display: inline-block;
+            width: 100px;
+            height: 100px;
+            border: 1px dashed #999;
+            text-align: center;
+            line-height: 100px;
+            color: #999;
+            font-size: 8pt;
+            margin: 20px 0;
+        }
+        
+        @media print {
+            .pagebreak {
+                page-break-before: always;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        Унифицированная форма № ТОРГ-12<br>
+        Утверждена постановлением Госкомстата России от 25.12.98 № 132
+    </div>
+    
+    <div class="title">
+        ТОВАРНАЯ НАКЛАДНАЯ № {{documentNumber}} от {{documentDate}}
+    </div>
+    
+    <table class="info-table">
+        <tr>
+            <td width="50%">
+                <strong>Грузоотправитель и его адрес:</strong><br>
+                {{supplier.name}}<br>
+                ИНН {{supplier.inn}} / КПП {{supplier.kpp}}<br>
+                {{supplier.address}}
+            </td>
+            <td width="50%">
+                <strong>Грузополучатель и его адрес:</strong><br>
+                {{buyer.legal_name}}<br>
+                ИНН {{buyer.inn}} / КПП {{buyer.kpp}}<br>
+                {{buyer.delivery_address}}
+            </td>
+        </tr>
+        <tr>
+            <td>
+                <strong>Поставщик и его адрес:</strong><br>
+                {{supplier.name}}<br>
+                {{supplier.address}}
+            </td>
+            <td>
+                <strong>Покупатель и его адрес:</strong><br>
+                {{buyer.legal_name}}<br>
+                {{buyer.address}}
+            </td>
+        </tr>
+        <tr>
+            <td>
+                <strong>Основание:</strong> Заказ №{{orderNumber}} от {{orderDate}}
+            </td>
+            <td>
+                <strong>Транспортная накладная:</strong> _____________
+            </td>
+        </tr>
+    </table>
+    
+    <table class="main-table">
+        <thead>
+            <tr>
+                <th rowspan="2" width="30">№<br>п/п</th>
+                <th colspan="2">Товар</th>
+                <th rowspan="2" width="60">Единица<br>измерения</th>
+                <th rowspan="2" width="50">Вид<br>упаковки</th>
+                <th colspan="2">Количество</th>
+                <th rowspan="2" width="60">Масса<br>брутто</th>
+                <th rowspan="2" width="60">Коли-<br>чество<br>(масса<br>нетто)</th>
+                <th rowspan="2" width="70">Цена,<br>руб. коп.</th>
+                <th rowspan="2" width="80">Сумма без<br>учета НДС,<br>руб. коп.</th>
+                <th colspan="2">НДС</th>
+                <th rowspan="2" width="90">Сумма с<br>учетом НДС,<br>руб. коп.</th>
+            </tr>
+            <tr>
+                <th width="200">наименование,<br>характеристика, сорт,<br>артикул товара</th>
+                <th width="80">код</th>
+                <th width="50">в одном<br>месте</th>
+                <th width="50">мест,<br>штук</th>
+                <th width="40">ставка, %</th>
+                <th width="70">сумма,<br>руб. коп.</th>
+            </tr>
+            <tr>
+                <th>1</th>
+                <th>2</th>
+                <th>3</th>
+                <th>4</th>
+                <th>5</th>
+                <th>6</th>
+                <th>7</th>
+                <th>8</th>
+                <th>9</th>
+                <th>10</th>
+                <th>11</th>
+                <th>12</th>
+                <th>13</th>
+                <th>14</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{#each items}}
+            <tr>
+                <td>{{@index}}</td>
+                <td class="text-left">{{this.product_name}}</td>
+                <td>—</td>
+                <td>{{this.unit}}</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td class="text-right">{{this.quantity}}</td>
+                <td class="text-right">{{formatPrice this.price}}</td>
+                <td class="text-right">{{formatPrice this.sumWithoutVat}}</td>
+                <td>{{../vatRate}}</td>
+                <td class="text-right">{{formatPrice this.vatAmount}}</td>
+                <td class="text-right">{{formatPrice this.total}}</td>
+            </tr>
+            {{/each}}
+            <tr>
+                <td colspan="9" class="text-right"><strong>Итого</strong></td>
+                <td class="text-right"><strong>{{formatPrice totalWithoutVat}}</strong></td>
+                <td>X</td>
+                <td class="text-right"><strong>{{formatPrice totalVat}}</strong></td>
+                <td class="text-right"><strong>{{formatPrice totalAmount}}</strong></td>
+            </tr>
+            <tr>
+                <td colspan="9" class="text-right"><strong>Всего по накладной</strong></td>
+                <td class="text-right"><strong>{{formatPrice totalWithoutVat}}</strong></td>
+                <td>X</td>
+                <td class="text-right"><strong>{{formatPrice totalVat}}</strong></td>
+                <td class="text-right"><strong>{{formatPrice totalAmount}}</strong></td>
+            </tr>
+        </tbody>
+    </table>
+    
+    <div class="totals">
+        <p>Товарная накладная имеет приложение на _______ листах</p>
+        <p>и содержит {{itemsCount}} порядковых номеров записей</p>
+        <p>
+            <strong>Масса груза (нетто):</strong> _____________ 
+            <strong>Масса груза (брутто):</strong> _____________
+        </p>
+        <p>
+            <strong>Всего мест:</strong> _____________ 
+            <strong>В том числе на условиях:</strong> _____________
+        </p>
+        <p><strong>По настоящему документу поставлена продукция в ассортименте согласно спецификации.</strong></p>
+    </div>
+    
+    <div class="signatures">
+        <div class="signature-block">
+            <p><strong>Отпуск груза разрешил:</strong></p>
+            <p>
+                Директор
+                <span class="signature-line"></span>
+                {{supplier.director}}
+            </p>
+            <div class="stamp-place">М.П.</div>
+            
+            <p><strong>Главный (старший) бухгалтер:</strong></p>
+            <p>
+                <span class="signature-line"></span>
+                {{supplier.accountant}}
+            </p>
+            
+            <p><strong>Отпуск груза произвел:</strong></p>
+            <p>
+                _________________
+                <span class="signature-line"></span>
+                _________________
+            </p>
+            <p style="font-size: 8pt;">(должность) (подпись) (расшифровка подписи)</p>
+            
+            <p>«____» _____________ 20___ года</p>
+        </div>
+        
+        <div class="signature-block" style="float: right;">
+            <p><strong>Груз принял:</strong></p>
+            <p>
+                Директор
+                <span class="signature-line"></span>
+                {{buyer.director_name}}
+            </p>
+            <div class="stamp-place">М.П.</div>
+            
+            <p><strong>Груз получил грузополучатель:</strong></p>
+            <p>
+                _________________
+                <span class="signature-line"></span>
+                _________________
+            </p>
+            <p style="font-size: 8pt;">(должность) (подпись) (расшифровка подписи)</p>
+            
+            <p>«____» _____________ 20___ года</p>
+        </div>
+    </div>
+</body>
+</html>

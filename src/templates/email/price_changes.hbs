@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 700px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .header {
+            background-color: #FF5722;
+            color: white;
+            padding: 20px;
+            text-align: center;
+            border-radius: 5px 5px 0 0;
+        }
+        .content {
+            background-color: #f9f9f9;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 0 0 5px 5px;
+        }
+        .changes-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background-color: white;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .changes-table th {
+            background-color: #f5f5f5;
+            padding: 12px;
+            text-align: left;
+            border-bottom: 2px solid #ddd;
+            font-weight: bold;
+        }
+        .changes-table td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        .price-up {
+            color: #f44336;
+            font-weight: bold;
+        }
+        .price-down {
+            color: #4CAF50;
+            font-weight: bold;
+        }
+        .price-change {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 12px;
+        }
+        .price-change.up {
+            background-color: #ffebee;
+            color: #c62828;
+        }
+        .price-change.down {
+            background-color: #e8f5e9;
+            color: #2e7d32;
+        }
+        .summary {
+            background-color: white;
+            padding: 15px;
+            border: 1px solid #e0e0e0;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+        .footer {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+            text-align: center;
+            font-size: 12px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h2>📈 Уведомление об изменении цен</h2>
+        <p style="margin: 5px 0;">{{formatDate date}}</p>
+    </div>
+    
+    <div class="content">
+        <div class="summary">
+            <h3 style="margin-top: 0;">Сводка изменений:</h3>
+            <p>Обновлено цен: <strong>{{changesCount}}</strong></p>
+            <p>Дата обновления: {{formatDate date}} {{formatTime date}}</p>
+        </div>
+        
+        <h3>Детали изменений:</h3>
+        <table class="changes-table">
+            <thead>
+                <tr>
+                    <th>Продукт</th>
+                    <th>Ед.</th>
+                    <th>Тип цены</th>
+                    <th>Старая цена</th>
+                    <th>Новая цена</th>
+                    <th>Изменение</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{#each changes}}
+                <tr>
+                    <td><strong>{{productName}}</strong></td>
+                    <td>{{unit}}</td>
+                    <td>{{priceType}}</td>
+                    <td>{{formatCurrency oldPrice}}</td>
+                    <td>
+                        {{#if (gt newPrice oldPrice)}}
+                            <span class="price-up">{{formatCurrency newPrice}}</span>
+                        {{else}}
+                            <span class="price-down">{{formatCurrency newPrice}}</span>
+                        {{/if}}
+                    </td>
+                    <td>
+                        {{#if (gt changePercent 0)}}
+                            <span class="price-change up">+{{changePercent}}%</span>
+                        {{else}}
+                            <span class="price-change down">{{changePercent}}%</span>
+                        {{/if}}
+                    </td>
+                </tr>
+                {{/each}}
+            </tbody>
+        </table>
+        
+        <div style="background-color: #e3f2fd; padding: 15px; border-radius: 5px; margin-top: 30px;">
+            <p style="margin: 0;"><strong>💡 Информация:</strong></p>
+            <p style="margin: 5px 0;">• Цены обновлены в системе автоматически</p>
+            <p style="margin: 5px 0;">• Изменения вступают в силу немедленно</p>
+            <p style="margin: 5px 0;">• Для просмотра истории цен используйте команду /price_history в боте</p>
+        </div>
+    </div>
+    
+    <div class="footer">
+        <p>Это автоматическое уведомление от системы управления закупками</p>
+        <p>Отправлено: {{formatDate date}} в {{formatTime date}}</p>
+    </div>
+</body>
+</html>
