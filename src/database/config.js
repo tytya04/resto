@@ -14,6 +14,21 @@ const sequelize = new Sequelize({
   dialectOptions: {
     // Включаем поддержку внешних ключей в SQLite
     foreignKeys: true
+  },
+  pool: {
+    max: 1,
+    min: 0,
+    acquire: 30000,
+    idle: 10000
+  },
+  retry: {
+    match: [
+      /SQLITE_BUSY/,
+      /SQLITE_LOCKED/
+    ],
+    max: 5,
+    backoffBase: 100,
+    backoffExponent: 1.2
   }
 });
 

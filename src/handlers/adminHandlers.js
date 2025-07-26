@@ -1555,6 +1555,42 @@ const handleAdminCallbacks = async (ctx) => {
         request.processed_at = new Date();
         await request.save();
         
+        // Уведомляем других админов и менеджеров о том, что заявка обработана
+        try {
+          const processedByName = ctx.user.first_name || ctx.user.username || 'Администратор';
+          const syncMessage = 
+            `✅ <b>Заявка на регистрацию обработана</b>\n\n` +
+            `👤 Пользователь: ${request.first_name || ''} ${request.last_name || ''}\n` +
+            `📱 Username: @${request.username || 'не указан'}\n` +
+            `🆔 Telegram ID: ${request.telegram_id}\n\n` +
+            `✅ Обработал: ${processedByName}\n` +
+            `📅 Время: ${new Date().toLocaleString('ru-RU')}`;
+          
+          // Получаем всех админов и менеджеров кроме текущего пользователя
+          const otherAdminsAndManagers = await User.findAll({
+            where: {
+              role: ['admin', 'manager'],
+              is_active: true,
+              id: { [require('sequelize').Op.ne]: ctx.user.id }
+            }
+          });
+          
+          // Отправляем уведомления
+          const notificationService = require('../services/NotificationService');
+          await Promise.all(
+            otherAdminsAndManagers.map(user => 
+              notificationService.sendToTelegramId(user.telegram_id, syncMessage, {
+                parse_mode: 'HTML'
+              })
+            )
+          );
+          
+          logger.info(`Sent registration sync notifications to ${otherAdminsAndManagers.length} users`);
+        } catch (syncError) {
+          logger.error('Error sending registration sync notifications:', syncError);
+          // Не прерываем основной процесс из-за ошибки синхронизации
+        }
+        
         // Если это ресторан, показываем выбор ресторана
         if (role === 'restaurant') {
           const restaurants = await Restaurant.findAll({
@@ -1603,10 +1639,47 @@ const handleAdminCallbacks = async (ctx) => {
       try {
         const user = await User.findByPk(userId);
         if (user) {
+          const restaurant = await Restaurant.findByPk(parseInt(restaurantId));
           user.restaurant_id = parseInt(restaurantId);
           await user.save();
           
           await notifyUserAboutApproval(ctx, user, 'restaurant', restaurantId);
+          
+          // Уведомляем других админов и менеджеров о завершении регистрации
+          try {
+            const processedByName = ctx.user.first_name || ctx.user.username || 'Администратор';
+            const syncMessage = 
+              `✅ <b>Регистрация ресторана завершена</b>\n\n` +
+              `👤 Пользователь: ${user.first_name || ''} ${user.last_name || ''}\n` +
+              `📱 Username: @${user.username || 'не указан'}\n` +
+              `🆔 Telegram ID: ${user.telegram_id}\n` +
+              `🏪 Ресторан: ${restaurant?.name || 'Не указан'}\n\n` +
+              `✅ Обработал: ${processedByName}\n` +
+              `📅 Время: ${new Date().toLocaleString('ru-RU')}`;
+            
+            // Получаем всех админов и менеджеров кроме текущего пользователя
+            const otherAdminsAndManagers = await User.findAll({
+              where: {
+                role: ['admin', 'manager'],
+                is_active: true,
+                id: { [require('sequelize').Op.ne]: ctx.user.id }
+              }
+            });
+            
+            // Отправляем уведомления
+            const notificationService = require('../services/NotificationService');
+            await Promise.all(
+              otherAdminsAndManagers.map(user => 
+                notificationService.sendToTelegramId(user.telegram_id, syncMessage, {
+                  parse_mode: 'HTML'
+                })
+              )
+            );
+            
+            logger.info(`Sent restaurant assignment sync notifications to ${otherAdminsAndManagers.length} users`);
+          } catch (syncError) {
+            logger.error('Error sending restaurant assignment sync notifications:', syncError);
+          }
           
           await ctx.editMessageText(
             `✅ <b>Готово!</b>\n\n` +
@@ -1630,6 +1703,42 @@ const handleAdminCallbacks = async (ctx) => {
       try {
         const user = await User.findByPk(userId);
         await notifyUserAboutApproval(ctx, user, 'restaurant');
+        
+        // Уведомляем других админов и менеджеров о завершении регистрации
+        try {
+          const processedByName = ctx.user.first_name || ctx.user.username || 'Администратор';
+          const syncMessage = 
+            `✅ <b>Регистрация ресторана завершена</b>\n\n` +
+            `👤 Пользователь: ${user.first_name || ''} ${user.last_name || ''}\n` +
+            `📱 Username: @${user.username || 'не указан'}\n` +
+            `🆔 Telegram ID: ${user.telegram_id}\n` +
+            `🏪 Ресторан: Будет привязан позже\n\n` +
+            `✅ Обработал: ${processedByName}\n` +
+            `📅 Время: ${new Date().toLocaleString('ru-RU')}`;
+          
+          // Получаем всех админов и менеджеров кроме текущего пользователя
+          const otherAdminsAndManagers = await User.findAll({
+            where: {
+              role: ['admin', 'manager'],
+              is_active: true,
+              id: { [require('sequelize').Op.ne]: ctx.user.id }
+            }
+          });
+          
+          // Отправляем уведомления
+          const notificationService = require('../services/NotificationService');
+          await Promise.all(
+            otherAdminsAndManagers.map(user => 
+              notificationService.sendToTelegramId(user.telegram_id, syncMessage, {
+                parse_mode: 'HTML'
+              })
+            )
+          );
+          
+          logger.info(`Sent restaurant skip sync notifications to ${otherAdminsAndManagers.length} users`);
+        } catch (syncError) {
+          logger.error('Error sending restaurant skip sync notifications:', syncError);
+        }
         
         await ctx.editMessageText(
           `✅ <b>Готово!</b>\n\n` +

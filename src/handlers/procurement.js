@@ -1,5 +1,6 @@
 const { Markup } = require('telegraf');
 const { Order, OrderItem, Restaurant, Purchase, User } = require('../database/models');
+const { Op } = require('sequelize');
 const OrderService = require('../services/OrderService');
 const logger = require('../utils/logger');
 const moment = require('moment');
@@ -8,9 +9,10 @@ const { formatInTimezone } = require('../utils/timezone');
 // Меню закупщика
 const menu = async (ctx) => {
   const keyboard = Markup.keyboard([
-    ['📋 Консолидированный список', '🛒 Активные закупки'],
-    ['✅ Завершенные закупки', '📊 Статистика закупок'],
-    ['⚙️ Настройки', '🔙 Главное меню']
+    ['📋 Общий список продуктов', '📦 Заявки по ресторанам'],
+    ['🛒 Закупка', '📊 Комплектация корзин'],
+    ['✅ Завершенные заказы', '📈 Статистика'],
+    ['🔙 Главное меню']
   ]).resize();
 
   await ctx.reply(
@@ -157,7 +159,7 @@ const completedPurchases = async (ctx) => {
       where: { 
         status: 'completed',
         purchase_date: {
-          [Purchase.sequelize.Op.gte]: moment().subtract(30, 'days').toDate()
+          [Op.gte]: moment().subtract(30, 'days').toDate()
         }
       },
       include: [
@@ -208,17 +210,19 @@ const purchaseStatistics = async (ctx) => {
     
     const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
     
+    const { sequelize } = require('../database/models');
+    
     // Статистика за сегодня
     const todayStats = await Purchase.findOne({
       where: {
         purchase_date: {
-          [Purchase.sequelize.Op.gte]: today
+          [Op.gte]: today
         },
         status: 'completed'
       },
       attributes: [
-        [Purchase.sequelize.fn('COUNT', 'id'), 'count'],
-        [Purchase.sequelize.fn('SUM', Purchase.sequelize.col('total_price')), 'total']
+        [sequelize.fn('COUNT', 'id'), 'count'],
+        [sequelize.fn('SUM', sequelize.col('total_price')), 'total']
       ]
     });
     
@@ -226,13 +230,13 @@ const purchaseStatistics = async (ctx) => {
     const monthStats = await Purchase.findOne({
       where: {
         purchase_date: {
-          [Purchase.sequelize.Op.gte]: monthStart
+          [Op.gte]: monthStart
         },
         status: 'completed'
       },
       attributes: [
-        [Purchase.sequelize.fn('COUNT', 'id'), 'count'],
-        [Purchase.sequelize.fn('SUM', Purchase.sequelize.col('total_price')), 'total']
+        [sequelize.fn('COUNT', 'id'), 'count'],
+        [sequelize.fn('SUM', sequelize.col('total_price')), 'total']
       ]
     });
     
@@ -240,19 +244,19 @@ const purchaseStatistics = async (ctx) => {
     const topProducts = await Purchase.findAll({
       where: {
         purchase_date: {
-          [Purchase.sequelize.Op.gte]: monthStart
+          [Op.gte]: monthStart
         },
         status: 'completed'
       },
       attributes: [
         'product_name',
         'unit',
-        [Purchase.sequelize.fn('COUNT', 'id'), 'count'],
-        [Purchase.sequelize.fn('SUM', Purchase.sequelize.col('purchased_quantity')), 'total_quantity'],
-        [Purchase.sequelize.fn('SUM', Purchase.sequelize.col('total_price')), 'total_price']
+        [sequelize.fn('COUNT', 'id'), 'count'],
+        [sequelize.fn('SUM', sequelize.col('purchased_quantity')), 'total_quantity'],
+        [sequelize.fn('SUM', sequelize.col('total_price')), 'total_price']
       ],
       group: ['product_name', 'unit'],
-      order: [[Purchase.sequelize.fn('COUNT', 'id'), 'DESC']],
+      order: [[sequelize.fn('COUNT', 'id'), 'DESC']],
       limit: 10
     });
     
@@ -365,7 +369,10 @@ const handleTextCommands = async (ctx) => {
 // Закупки
 const purchases = async (ctx) => {
   try {
-    await ctx.answerCbQuery();
+    // Отвечаем на callback query только если это callback
+    if (ctx.callbackQuery) {
+      await ctx.answerCbQuery();
+    }
     
     const keyboard = {
       reply_markup: {
@@ -392,7 +399,10 @@ const purchases = async (ctx) => {
 // Отчеты
 const reports = async (ctx) => {
   try {
-    await ctx.answerCbQuery();
+    // Отвечаем на callback query только если это callback
+    if (ctx.callbackQuery) {
+      await ctx.answerCbQuery();
+    }
     
     const keyboard = {
       reply_markup: {

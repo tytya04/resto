@@ -8,13 +8,25 @@ const { formatInTimezone } = require('../utils/timezone');
 const { hasMultipleBranches, showBranchSelection } = require('./restaurantBranch');
 
 /**
+ * Безопасный ответ на callback query
+ */
+const safeAnswerCbQuery = async (ctx, text = null) => {
+  try {
+    await ctx.answerCbQuery(text);
+  } catch (error) {
+    // Игнорируем ошибку устаревшего callback query
+    logger.debug('Callback query expired, continuing with operation');
+  }
+};
+
+/**
  * Начало добавления продуктов в заказ
  */
 const startAddingProducts = async (ctx) => {
   try {
     // Отвечаем на callback если это кнопка
     if (ctx.callbackQuery) {
-      await ctx.answerCbQuery();
+      await safeAnswerCbQuery(ctx);
     }
 
     const user = ctx.user || ctx.session?.user;
@@ -42,11 +54,6 @@ const startAddingProducts = async (ctx) => {
       }
     }
     
-    // Если создаем новый заказ (нет draftId), очищаем выбор филиала
-    if (!draftId && ctx.callbackQuery?.data === 'menu_create_order') {
-      delete ctx.session?.selectedBranchId;
-    }
-
     let draft;
     if (draftId) {
       // Если есть ID - используем конкретный черновик
@@ -55,22 +62,70 @@ const startAddingProducts = async (ctx) => {
         return ctx.reply('❌ Черновик не найден');
       }
     } else {
-      // Проверяем, есть ли несколько филиалов
+      // При создании нового заказа ВСЕГДА показываем выбор филиала
       const restaurantId = user.restaurant_id;
-      const hasBranches = await hasMultipleBranches(restaurantId);
+      const branches = await RestaurantBranch.findAll({
+        where: { 
+          restaurantId: restaurantId,
+          isActive: true
+        },
+        order: [['isMain', 'DESC'], ['address', 'ASC']]
+      });
       
-      if (hasBranches && !ctx.session?.selectedBranchId) {
-        // Показываем выбор филиала
-        ctx.session = ctx.session || {};
-        ctx.session.pendingAction = 'create_order';
+      if (branches.length === 0) {
+        return ctx.reply('❌ У вашего ресторана нет активных филиалов');
+      }
+      
+      // Если только один филиал - сразу создаем для него заказ
+      if (branches.length === 1) {
+        draft = await draftOrderService.getOrCreateDraftOrder(restaurantId, user.id, branches[0].id);
+      } else {
+        // Показываем список филиалов с информацией о черновиках
+        const keyboard = {
+          inline_keyboard: []
+        };
         
-        await showBranchSelection(ctx, restaurantId, 'select_branch_for_order');
+        for (const branch of branches) {
+          // Проверяем есть ли черновик для этого филиала
+          const existingDraft = await DraftOrder.findOne({
+            where: {
+              restaurant_id: restaurantId,
+              branch_id: branch.id,
+              status: 'draft'
+            },
+            include: [{
+              model: DraftOrderItem,
+              as: 'draftOrderItems'
+            }]
+          });
+          
+          let buttonText = `📍 ${branch.address}`;
+          if (branch.isMain) buttonText += ' (Главный)';
+          if (existingDraft && existingDraft.draftOrderItems.length > 0) {
+            buttonText += ` 📦 ${existingDraft.draftOrderItems.length}`;
+          }
+          
+          keyboard.inline_keyboard.push([{
+            text: buttonText,
+            callback_data: `create_order_branch:${branch.id}`
+          }]);
+        }
+        
+        keyboard.inline_keyboard.push([{
+          text: '❌ Отмена',
+          callback_data: 'cancel_branch_selection'
+        }]);
+        
+        await ctx.reply(
+          '🏢 <b>Выберите филиал для заказа:</b>\n\n' +
+          '📦 - количество товаров в черновике',
+          { 
+            reply_markup: keyboard,
+            parse_mode: 'HTML'
+          }
+        );
         return;
       }
-
-      // Получаем или создаем черновик
-      const branchId = ctx.session?.selectedBranchId || null;
-      draft = await draftOrderService.getOrCreateDraftOrder(restaurantId, user.id, branchId);
     }
     
     const scheduledTime = formatInTimezone(draft.scheduled_for);
@@ -402,11 +457,20 @@ const handleProductText = async (ctx) => {
     // Обрабатываем продукты, требующие уточнения единицы измерения
     if (results.needsUnitClarification.length > 0) {
       for (const { line, parsed } of results.needsUnitClarification) {
+        // Создаем короткий идентификатор и сохраняем данные в сессии
+        const tempId = Date.now().toString(36);
+        ctx.session.unitClarification = ctx.session.unitClarification || {};
+        ctx.session.unitClarification[tempId] = {
+          name: parsed.name,
+          matchedProductId: parsed.matchedProductId,
+          quantity: parsed.quantity
+        };
+        
         const keyboard = {
           reply_markup: {
             inline_keyboard: parsed.possibleUnits.map(unit => [{
               text: `${unit}`,
-              callback_data: `unit_clarify:${parsed.name}:${parsed.quantity}:${unit}`
+              callback_data: `unit_clarify:${tempId}:${unit}`
             }])
           }
         };
@@ -514,7 +578,7 @@ const handleProductText = async (ctx) => {
  */
 const confirmProductMatch = async (ctx) => {
   try {
-    await ctx.answerCbQuery();
+    await safeAnswerCbQuery(ctx);
     
     const [, itemId, productId] = ctx.callbackQuery.data.split(':');
     
@@ -534,7 +598,7 @@ const confirmProductMatch = async (ctx) => {
  */
 const viewDraft = async (ctx) => {
   try {
-    await ctx.answerCbQuery();
+    await safeAnswerCbQuery(ctx);
     
     // Получаем черновик с учетом ID из сессии и филиала
     const draft = await draftOrderService.getCurrentDraft(
@@ -552,6 +616,14 @@ const viewDraft = async (ctx) => {
     }
 
     let message = '📋 <b>Текущий заказ:</b>\n';
+    
+    // Добавляем информацию о филиале
+    if (draft.branch) {
+      message += `🏢 Филиал: ${draft.branch.address}`;
+      if (draft.branch.isMain) message += ' (Главный)';
+      message += '\n';
+    }
+    
     message += `📅 Отправка: ${formatInTimezone(draft.scheduled_for)}\n\n`;
     
     // Группируем по статусу
@@ -591,6 +663,14 @@ const viewDraft = async (ctx) => {
       ]);
     }
     
+    // Проверяем есть ли у ресторана несколько филиалов
+    const hasMultiple = await hasMultipleBranches(ctx.user.restaurant_id);
+    if (hasMultiple) {
+      keyboard.reply_markup.inline_keyboard.push([
+        { text: '🏢 Сменить филиал', callback_data: 'menu_create_order' }
+      ]);
+    }
+    
     keyboard.reply_markup.inline_keyboard.push([
       { text: '🔙 Назад к списку', callback_data: 'my_orders' }
     ]);
@@ -611,7 +691,7 @@ const viewDraft = async (ctx) => {
  */
 const editDraft = async (ctx) => {
   try {
-    await ctx.answerCbQuery();
+    await safeAnswerCbQuery(ctx);
     
     // Получаем черновик с учетом ID из сессии
     const draft = await draftOrderService.getCurrentDraft(
@@ -655,7 +735,7 @@ const editDraft = async (ctx) => {
  */
 const editDraftItem = async (ctx) => {
   try {
-    await ctx.answerCbQuery();
+    await safeAnswerCbQuery(ctx);
     
     const itemId = ctx.callbackQuery.data.split(':')[1];
     
@@ -693,7 +773,7 @@ const editDraftItem = async (ctx) => {
  */
 const changeDraftItemQuantity = async (ctx) => {
   try {
-    await ctx.answerCbQuery();
+    await safeAnswerCbQuery(ctx);
     
     const itemId = ctx.callbackQuery.data.split(':')[1];
     
@@ -729,7 +809,7 @@ const changeDraftItemQuantity = async (ctx) => {
  */
 const removeItem = async (ctx) => {
   try {
-    await ctx.answerCbQuery('Позиция удалена');
+    await safeAnswerCbQuery(ctx, 'Позиция удалена');
     
     const itemId = ctx.callbackQuery.data.split(':')[1];
     await draftOrderService.removeItem(itemId, ctx.user.id);
@@ -746,7 +826,7 @@ const removeItem = async (ctx) => {
  */
 const finishAdding = async (ctx) => {
   try {
-    await ctx.answerCbQuery();
+    await safeAnswerCbQuery(ctx);
     
     delete ctx.session.addingProducts;
     delete ctx.session.draftOrderId;
@@ -777,7 +857,7 @@ const finishAdding = async (ctx) => {
  */
 const sendDraft = async (ctx) => {
   try {
-    await ctx.answerCbQuery();
+    await safeAnswerCbQuery(ctx);
     
     const draft = await draftOrderService.getCurrentDraft(
       ctx.user.id,
@@ -792,10 +872,24 @@ const sendDraft = async (ctx) => {
     // Проверяем, есть ли неподтвержденные позиции
     const unmatchedItems = draft.draftOrderItems.filter(i => i.status === 'unmatched');
     if (unmatchedItems.length > 0) {
-      return ctx.reply(
-        '❌ В заказе есть неподтвержденные позиции.\n\n' +
-        'Пожалуйста, уточните все позиции перед отправкой.'
-      );
+      let message = '❌ В заказе есть неподтвержденные позиции.\n\n';
+      message += '❓ <b>Требуют уточнения:</b>\n';
+      unmatchedItems.forEach((item, index) => {
+        message += `${index + 1}. ${item.original_name} - ${item.quantity} ${item.unit}\n`;
+      });
+      message += '\nПожалуйста, уточните все позиции перед отправкой.';
+      
+      const keyboard = {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✏️ Редактировать неподтвержденные', callback_data: 'draft_edit_unmatched' }],
+            [{ text: '📋 Посмотреть весь заказ', callback_data: 'draft_view' }],
+            [{ text: '🔙 Назад', callback_data: 'my_orders' }]
+          ]
+        }
+      };
+      
+      return ctx.reply(message, { parse_mode: 'HTML', ...keyboard });
     }
     
     // Преобразуем черновик в заказ
@@ -825,6 +919,24 @@ const sendDraft = async (ctx) => {
       stack: error.stack,
       draftId: ctx.session?.draftOrderId
     });
+    
+    // Специальная обработка для SQLITE_BUSY
+    if (error.message.includes('SQLITE_BUSY')) {
+      return ctx.reply(
+        '⚠️ База данных временно занята. Пожалуйста, попробуйте еще раз через несколько секунд.\n\n' +
+        'Если ошибка повторяется, обратитесь к администратору.',
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔄 Попробовать снова', callback_data: `draft_send:${ctx.session?.draftOrderId}` }],
+              [{ text: '📋 Посмотреть заказ', callback_data: 'draft_view' }],
+              [{ text: '🏠 Главное меню', callback_data: 'menu_main' }]
+            ]
+          }
+        }
+      );
+    }
+    
     ctx.reply(`❌ Произошла ошибка при отправке заказа: ${error.message}`);
   }
 };
@@ -834,105 +946,78 @@ const sendDraft = async (ctx) => {
  */
 const handleUnitClarification = async (ctx) => {
   try {
-    await ctx.answerCbQuery();
+    await safeAnswerCbQuery(ctx);
     
-    const [, productName, quantity, unit] = ctx.callbackQuery.data.split(':');
+    const parts = ctx.callbackQuery.data.split(':');
+    let tempId, unit, quantity, productName, matchedProduct;
     
-    // Формируем строку с единицей измерения и снова обрабатываем
-    const textWithUnit = `${productName} ${quantity} ${unit}`;
-    
-    const results = await draftOrderService.parseAndAddProducts(
-      ctx.session.draftOrderId,
-      textWithUnit,
-      ctx.user.id
-    );
-    
-    // Проверяем дубликаты
-    if (results.duplicates && results.duplicates.length > 0) {
-      const dup = results.duplicates[0];
-      const keyboard = {
-        reply_markup: {
-          inline_keyboard: [
-            [{
-              text: `✅ Да, добавить ${dup.newQuantity} ${dup.existing.unit}`,
-              callback_data: `duplicate_add:${dup.existing.id}:${dup.newQuantity}`
-            }],
-            [{
-              text: `✏️ Заменить на ${dup.newQuantity} ${dup.existing.unit}`,
-              callback_data: `duplicate_replace:${dup.existing.id}:${dup.newQuantity}`
-            }],
-            [{
-              text: '❌ Отмена',
-              callback_data: `duplicate_cancel:${dup.existing.id}`
-            }]
-          ]
-        }
-      };
+    if (parts.length === 3) {
+      // Новый формат: unit_clarify:tempId:unit
+      [, tempId, unit] = parts;
       
-      await ctx.editMessageText(
-        `⚠️ <b>Продукт уже есть в заказе!</b>\n\n` +
-        `<b>${dup.product.product_name}</b>\n` +
-        `Текущее количество: ${dup.existing.quantity} ${dup.existing.unit}\n` +
-        `Вы хотите добавить: ${dup.newQuantity} ${dup.existing.unit}\n\n` +
-        `Что сделать?`,
-        { parse_mode: 'HTML', ...keyboard }
-      );
-      return;
-    }
-    
-    // Обновляем сообщение
-    if (results.matched.length > 0) {
-      const item = results.matched[0].item;
+      const clarificationData = ctx.session?.unitClarification?.[tempId];
+      if (!clarificationData) {
+        return ctx.reply('❌ Ошибка: данные не найдены. Попробуйте еще раз.');
+      }
       
-      // Добавляем кнопки для продолжения работы
-      const continueKeyboard = {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '➕ Добавить еще продукты', callback_data: 'draft_add_more' }],
-            [{ text: '📋 Посмотреть весь заказ', callback_data: 'draft_view' }],
-            [{ text: '✅ Готово', callback_data: 'draft_done' }]
-          ]
-        }
-      };
+      productName = clarificationData.name;
+      quantity = clarificationData.quantity;
       
-      await ctx.editMessageText(
-        `✅ Добавлено: ${item.product_name} - ${item.quantity} ${item.unit}`,
-        { parse_mode: 'HTML', ...continueKeyboard }
-      );
-    } else if (results.unmatched.length > 0) {
-      const item = results.unmatched[0].item;
-      const suggestions = results.unmatched[0].suggestions;
+      if (clarificationData.matchedProductId) {
+        matchedProduct = await NomenclatureCache.findByPk(clarificationData.matchedProductId);
+      }
       
-      await ctx.editMessageText(
-        `✅ Добавлено: ${item.product_name} - ${item.quantity} ${item.unit}\n\n` +
-        `⚠️ Продукт не найден в каталоге и требует уточнения.`
-      );
+      // Очищаем временные данные
+      delete ctx.session.unitClarification[tempId];
+    } else {
+      // Старый формат для совместимости: unit_clarify:identifier:quantity:unit
+      const [, identifier, quantityStr, unitStr] = parts;
+      quantity = quantityStr;
+      unit = unitStr;
       
-      // Если есть предложения, показываем их
-      if (suggestions.length > 0) {
-        const keyboard = {
-          reply_markup: {
-            inline_keyboard: suggestions.slice(0, 3).map(suggestion => [{
-              text: `✓ ${suggestion.product_name} (${suggestion.unit})`,
-              callback_data: `draft_match:${item.id}:${suggestion.id}`
-            }])
-          }
-        };
-        
-        keyboard.reply_markup.inline_keyboard.push([
-          { text: '🔍 Искать другой продукт', callback_data: `draft_search_for:${item.id}` },
-          { text: '❌ Удалить позицию', callback_data: `draft_remove:${item.id}` }
-        ]);
-        
-        await ctx.reply(
-          `❓ Выберите правильный вариант для "${item.original_name}":`,
-          keyboard
-        );
+      // Если identifier - это число, значит это ID продукта
+      if (!isNaN(identifier)) {
+        matchedProduct = await NomenclatureCache.findByPk(identifier);
+        productName = matchedProduct?.product_name;
+      } else {
+        // Иначе это закодированное имя продукта
+        productName = decodeURIComponent(identifier);
       }
     }
+    
+    const draftOrderId = ctx.session?.draftOrderId;
+    
+    if (!draftOrderId) {
+      return ctx.reply('❌ Ошибка: черновик не найден');
+    }
+    
+    // Если продукт не найден в каталоге, пытаемся найти
+    if (!matchedProduct) {
+      matchedProduct = await productMatcher.findExactMatch(productName);
+    }
+    
+    if (!matchedProduct) {
+      return ctx.editMessageText('❌ Продукт не найден в каталоге');
+    }
+    
+    // Создаем позицию с выбранной единицей измерения
+    const item = await DraftOrderItem.create({
+      draft_order_id: draftOrderId,
+      product_name: matchedProduct.product_name,
+      original_name: productName,
+      quantity: parseFloat(quantity),
+      unit: unit,
+      status: 'matched',
+      matched_product_id: matchedProduct.id,
+      added_by: ctx.user.id
+    });
+    
+    await ctx.editMessageText(
+      `✅ Добавлено: ${matchedProduct.product_name} - ${quantity} ${unit}`
+    );
   } catch (error) {
     logger.error('Error handling unit clarification:', error);
-    ctx.reply('❌ Произошла ошибка при обработке');
+    await ctx.reply('❌ Произошла ошибка при добавлении продукта');
   }
 };
 
@@ -941,7 +1026,7 @@ const handleUnitClarification = async (ctx) => {
  */
 const handleDuplicateAdd = async (ctx) => {
   try {
-    await ctx.answerCbQuery();
+    await safeAnswerCbQuery(ctx);
     
     const [, itemId, newQuantity, unit] = ctx.callbackQuery.data.split(':');
     
@@ -986,7 +1071,7 @@ const handleDuplicateAdd = async (ctx) => {
  */
 const handleDuplicateReplace = async (ctx) => {
   try {
-    await ctx.answerCbQuery();
+    await safeAnswerCbQuery(ctx);
     
     const [, itemId, newQuantity, unit] = ctx.callbackQuery.data.split(':');
     
@@ -1030,7 +1115,7 @@ const handleDuplicateReplace = async (ctx) => {
  */
 const handleDuplicateCancel = async (ctx) => {
   try {
-    await ctx.answerCbQuery('Отменено');
+    await safeAnswerCbQuery(ctx, 'Отменено');
     await ctx.editMessageText('❌ Добавление отменено');
   } catch (error) {
     logger.error('Error handling duplicate cancel:', error);
@@ -1042,7 +1127,7 @@ const handleDuplicateCancel = async (ctx) => {
  */
 const handleUnitDuplicate = async (ctx) => {
   try {
-    await ctx.answerCbQuery();
+    await safeAnswerCbQuery(ctx);
     
     const [, itemId, newQuantity, unit] = ctx.callbackQuery.data.split(':');
     
@@ -1089,7 +1174,7 @@ const handleUnitDuplicate = async (ctx) => {
  */
 const selectDraft = async (ctx) => {
   try {
-    await ctx.answerCbQuery();
+    await safeAnswerCbQuery(ctx);
     
     const draftId = ctx.callbackQuery.data.split(':')[1];
     const draft = await draftOrderService.getDraftById(draftId);
@@ -1164,6 +1249,245 @@ const selectDraft = async (ctx) => {
   }
 };
 
+/**
+ * Редактирование неподтвержденных позиций
+ */
+const editUnmatchedItems = async (ctx) => {
+  try {
+    await safeAnswerCbQuery(ctx);
+    
+    // Получаем черновик с учетом ID из сессии
+    const draft = await draftOrderService.getCurrentDraft(
+      ctx.user.id,
+      ctx.session?.draftOrderId
+    );
+    
+    // Сохраняем ID в сессии
+    ctx.session = ctx.session || {};
+    ctx.session.draftOrderId = draft.id;
+    
+    // Фильтруем только неподтвержденные позиции
+    const unmatchedItems = draft.draftOrderItems.filter(i => i.status === 'unmatched');
+    
+    if (unmatchedItems.length === 0) {
+      return ctx.reply('✅ Все позиции подтверждены!');
+    }
+
+    let message = '❓ <b>Неподтвержденные позиции:</b>\n\n';
+    message += 'Выберите позицию для редактирования или поиска в каталоге:\n\n';
+    
+    const keyboard = {
+      reply_markup: {
+        inline_keyboard: unmatchedItems.map((item, index) => [{
+          text: `${index + 1}. ${item.original_name} - ${item.quantity} ${item.unit}`,
+          callback_data: `draft_confirm_item:${item.id}`
+        }])
+      }
+    };
+    
+    keyboard.reply_markup.inline_keyboard.push([
+      { text: '❌ Удалить все неподтвержденные', callback_data: 'draft_remove_unmatched' }
+    ]);
+    
+    keyboard.reply_markup.inline_keyboard.push([
+      { text: '🔙 Назад', callback_data: 'draft_view' }
+    ]);
+    
+    await ctx.reply(message, { parse_mode: 'HTML', ...keyboard });
+  } catch (error) {
+    logger.error('Error editing unmatched items:', error);
+    ctx.reply('❌ Произошла ошибка');
+  }
+};
+
+/**
+ * Подтверждение отдельной позиции
+ */
+const confirmDraftItem = async (ctx) => {
+  try {
+    await safeAnswerCbQuery(ctx);
+    
+    const itemId = ctx.callbackQuery.data.split(':')[1];
+    
+    // Получаем информацию о позиции
+    const { DraftOrderItem } = require('../database/models');
+    const item = await DraftOrderItem.findByPk(itemId);
+    
+    if (!item) {
+      return ctx.reply('❌ Позиция не найдена');
+    }
+    
+    // Ищем похожие продукты в каталоге
+    const productMatcher = require('../services/ProductMatcher');
+    const searchResults = await productMatcher.searchWithAutoComplete(item.original_name, 10);
+    
+    if (searchResults.length === 0) {
+      let message = `❌ <b>Продукт не найден в каталоге</b>\n\n`;
+      message += `Искали: "${item.original_name}"\n`;
+      message += `Количество: ${item.quantity} ${item.unit}\n\n`;
+      message += 'Что делать с этой позицией?';
+      
+      const keyboard = {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✏️ Изменить название', callback_data: `draft_rename_item:${item.id}` }],
+            [{ text: '❌ Удалить позицию', callback_data: `draft_remove:${item.id}` }],
+            [{ text: '🔙 Назад к списку', callback_data: 'draft_edit_unmatched' }]
+          ]
+        }
+      };
+      
+      return ctx.reply(message, { parse_mode: 'HTML', ...keyboard });
+    }
+    
+    // Показываем найденные варианты
+    let message = `🔍 <b>Поиск: "${item.original_name}"</b>\n`;
+    message += `Количество: ${item.quantity} ${item.unit}\n\n`;
+    message += 'Выберите подходящий продукт из каталога:\n\n';
+    
+    const keyboard = {
+      reply_markup: {
+        inline_keyboard: searchResults.slice(0, 10).map((result, index) => [{
+          text: `${index + 1}. ${result.product_name}`,
+          callback_data: `draft_match_item:${item.id}:${result.id}`
+        }])
+      }
+    };
+    
+    keyboard.reply_markup.inline_keyboard.push([
+      { text: '❌ Нет подходящего варианта', callback_data: `draft_no_match:${item.id}` }
+    ]);
+    
+    keyboard.reply_markup.inline_keyboard.push([
+      { text: '🔙 Назад к списку', callback_data: 'draft_edit_unmatched' }
+    ]);
+    
+    await ctx.reply(message, { parse_mode: 'HTML', ...keyboard });
+  } catch (error) {
+    logger.error('Error confirming draft item:', error);
+    ctx.reply('❌ Произошла ошибка');
+  }
+};
+
+/**
+ * Сопоставление позиции с продуктом из каталога
+ */
+const matchDraftItem = async (ctx) => {
+  try {
+    await safeAnswerCbQuery(ctx, 'Позиция подтверждена');
+    
+    const [, itemId, productId] = ctx.callbackQuery.data.split(':');
+    
+    // Получаем информацию о позиции и продукте
+    const { DraftOrderItem, NomenclatureCache } = require('../database/models');
+    const item = await DraftOrderItem.findByPk(itemId);
+    const product = await NomenclatureCache.findByPk(productId);
+    
+    if (!item || !product) {
+      return ctx.reply('❌ Ошибка: позиция или продукт не найдены');
+    }
+    
+    // Обновляем позицию
+    item.product_name = product.product_name;
+    item.matched_product_id = product.id;
+    item.status = 'matched';
+    await item.save();
+    
+    await ctx.editMessageText(
+      `✅ Позиция подтверждена!\n\n` +
+      `${product.product_name} - ${item.quantity} ${item.unit}`
+    );
+    
+    // Через секунду возвращаемся к списку
+    setTimeout(() => {
+      editUnmatchedItems(ctx);
+    }, 1000);
+  } catch (error) {
+    logger.error('Error matching draft item:', error);
+    ctx.reply('❌ Произошла ошибка при подтверждении позиции');
+  }
+};
+
+/**
+ * Удаление всех неподтвержденных позиций
+ */
+const removeUnmatchedItems = async (ctx) => {
+  try {
+    await safeAnswerCbQuery(ctx);
+    
+    const draft = await draftOrderService.getCurrentDraft(
+      ctx.user.id,
+      ctx.session?.draftOrderId
+    );
+    
+    // Находим все неподтвержденные позиции
+    const unmatchedItems = draft.draftOrderItems.filter(i => i.status === 'unmatched');
+    const unmatchedCount = unmatchedItems.length;
+    
+    if (unmatchedCount === 0) {
+      return ctx.reply('✅ Нет неподтвержденных позиций');
+    }
+    
+    let message = `⚠️ <b>Подтверждение удаления</b>\n\n`;
+    message += `Вы действительно хотите удалить ${unmatchedCount} неподтвержденных позиций?\n\n`;
+    message += 'Будут удалены:\n';
+    unmatchedItems.forEach((item, index) => {
+      message += `• ${item.original_name} - ${item.quantity} ${item.unit}\n`;
+    });
+    
+    const keyboard = {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '✅ Да, удалить', callback_data: 'draft_confirm_remove_unmatched' },
+            { text: '❌ Отмена', callback_data: 'draft_edit_unmatched' }
+          ]
+        ]
+      }
+    };
+    
+    await ctx.reply(message, { parse_mode: 'HTML', ...keyboard });
+  } catch (error) {
+    logger.error('Error removing unmatched items:', error);
+    ctx.reply('❌ Произошла ошибка');
+  }
+};
+
+/**
+ * Подтверждение удаления неподтвержденных позиций
+ */
+const confirmRemoveUnmatched = async (ctx) => {
+  try {
+    await safeAnswerCbQuery(ctx, 'Удаляем неподтвержденные позиции...');
+    
+    const draft = await draftOrderService.getCurrentDraft(
+      ctx.user.id,
+      ctx.session?.draftOrderId
+    );
+    
+    // Удаляем все неподтвержденные позиции
+    const { DraftOrderItem } = require('../database/models');
+    const deleteCount = await DraftOrderItem.destroy({
+      where: {
+        draft_order_id: draft.id,
+        status: 'unmatched'
+      }
+    });
+    
+    await ctx.editMessageText(
+      `✅ Удалено ${deleteCount} неподтвержденных позиций`
+    );
+    
+    // Через секунду показываем обновленный черновик
+    setTimeout(() => {
+      viewDraft(ctx);
+    }, 1000);
+  } catch (error) {
+    logger.error('Error confirming remove unmatched:', error);
+    ctx.reply('❌ Произошла ошибка при удалении позиций');
+  }
+};
+
 module.exports = {
   startAddingProducts,
   handleProductText,
@@ -1180,5 +1504,10 @@ module.exports = {
   handleUnitDuplicate,
   handleDuplicateAdd,
   handleDuplicateReplace,
-  handleDuplicateCancel
+  handleDuplicateCancel,
+  editUnmatchedItems,
+  confirmDraftItem,
+  matchDraftItem,
+  removeUnmatchedItems,
+  confirmRemoveUnmatched
 };

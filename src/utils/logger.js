@@ -91,8 +91,29 @@ const logger = winston.createLogger({
 // В режиме разработки добавляем вывод в консоль
 if (config.nodeEnv !== 'production') {
   logger.add(new winston.transports.Console({
-    format: consoleFormat
+    format: consoleFormat,
+    handleExceptions: true,
+    handleRejections: true
   }));
+}
+
+// В production режиме добавляем консольный транспорт только если stdout доступен
+if (config.nodeEnv === 'production' && process.stdout && !process.stdout.destroyed) {
+  const consoleTransport = new winston.transports.Console({
+    format: consoleFormat,
+    handleExceptions: true,
+    handleRejections: true
+  });
+  
+  // Обработка ошибок записи в консоль
+  consoleTransport.on('error', (err) => {
+    if (err.code === 'EPIPE') {
+      // Игнорируем EPIPE ошибки
+      logger.remove(consoleTransport);
+    }
+  });
+  
+  logger.add(consoleTransport);
 }
 
 // Методы для структурированного логирования
@@ -153,8 +174,34 @@ logger.getCriticalErrors = () => {
   return errors;
 };
 
+// Обработка EPIPE ошибок
+process.on('EPIPE', () => {
+  // Игнорируем EPIPE ошибки
+});
+
+process.stdout.on('error', (err) => {
+  if (err.code === 'EPIPE') {
+    // Игнорируем EPIPE ошибки для stdout
+    return;
+  }
+  logger.logError(err, { type: 'stdout_error' });
+});
+
+process.stderr.on('error', (err) => {
+  if (err.code === 'EPIPE') {
+    // Игнорируем EPIPE ошибки для stderr
+    return;
+  }
+  logger.logError(err, { type: 'stderr_error' });
+});
+
 // Логирование необработанных исключений
 process.on('uncaughtException', (error) => {
+  // Игнорируем EPIPE ошибки
+  if (error.code === 'EPIPE') {
+    return;
+  }
+  
   logger.logError(error, { 
     type: 'uncaughtException',
     critical: true 

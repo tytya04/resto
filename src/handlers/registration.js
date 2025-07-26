@@ -3,6 +3,9 @@ const { Markup } = require('telegraf');
 const logger = require('../utils/logger');
 const { notifyManagers } = require('../services/NotificationService');
 
+// Хранилище таймеров для напоминаний
+const registrationReminders = new Map();
+
 // Обработчик команды /start
 const startCommand = async (ctx) => {
   try {
@@ -10,6 +13,9 @@ const startCommand = async (ctx) => {
     const username = ctx.from.username;
     const firstName = ctx.from.first_name;
     const lastName = ctx.from.last_name;
+    
+    // Показываем Telegram ID пользователю
+    logger.info(`User started bot: ID=${telegramId}, username=${username}`);
 
     // Проверяем, есть ли пользователь в БД
     let user = await User.findOne({ 
@@ -56,6 +62,7 @@ const startCommand = async (ctx) => {
     // Начинаем процесс регистрации
     await ctx.reply(
       `👋 Добро пожаловать в систему закупок!\n\n` +
+      `🆔 Ваш Telegram ID: ${telegramId}\n\n` +
       `Для регистрации в системе отправьте сообщение с информацией о себе:\n\n` +
       `📍 Если вы представляете ресторан, укажите:\n` +
       `• Название ресторана\n` +
@@ -77,6 +84,50 @@ const startCommand = async (ctx) => {
       first_name: firstName,
       last_name: lastName
     };
+
+    // Очищаем старый таймер, если был
+    if (registrationReminders.has(telegramId)) {
+      clearTimeout(registrationReminders.get(telegramId));
+    }
+
+    // Устанавливаем таймер напоминания через 30 секунд
+    const reminder = setTimeout(async () => {
+      try {
+        // Проверяем, не зарегистрировался ли пользователь за это время
+        const existingRequest = await RegistrationRequest.findOne({
+          where: { telegram_id: telegramId }
+        });
+
+        if (!existingRequest) {
+          await ctx.telegram.sendMessage(
+            telegramId,
+            '⏰ Напоминание!\n\n' +
+            'Для завершения регистрации вам нужно отправить информацию о себе.\n\n' +
+            '📝 Например:\n' +
+            '• "Ресторан Эмбер, ООО, ул. Ленина 1"\n' +
+            '• "Я менеджер, телефон +7900123456"\n\n' +
+            'Просто напишите сообщение в свободной форме, и мы обработаем вашу заявку.',
+            {
+              reply_markup: {
+                keyboard: [
+                  ['❌ Отменить регистрацию']
+                ],
+                resize_keyboard: true,
+                one_time_keyboard: true
+              }
+            }
+          );
+          logger.info('Registration reminder sent', { telegramId, username });
+        }
+        
+        // Удаляем таймер из хранилища
+        registrationReminders.delete(telegramId);
+      } catch (error) {
+        logger.error('Error sending registration reminder:', error);
+      }
+    }, 30000); // 30 секунд
+
+    registrationReminders.set(telegramId, reminder);
 
   } catch (error) {
     logger.error('Error in start command:', error);
@@ -420,6 +471,29 @@ const handleRegistrationText = async (ctx) => {
   if (ctx.session.awaitingRegistrationInfo) {
     const infoText = ctx.message.text.trim();
     
+    // Обработка отмены регистрации
+    if (infoText === '❌ Отменить регистрацию') {
+      const telegramId = ctx.session.registrationData.telegram_id;
+      
+      // Отменяем таймер
+      if (registrationReminders.has(telegramId)) {
+        clearTimeout(registrationReminders.get(telegramId));
+        registrationReminders.delete(telegramId);
+      }
+      
+      // Очищаем сессию
+      delete ctx.session.awaitingRegistrationInfo;
+      delete ctx.session.registrationData;
+      
+      await ctx.reply(
+        '❌ Регистрация отменена.\n\n' +
+        'Если передумаете, используйте команду /start для начала регистрации.',
+        { reply_markup: { remove_keyboard: true } }
+      );
+      
+      return true;
+    }
+    
     if (infoText.length < 10) {
       await ctx.reply('❌ Пожалуйста, предоставьте больше информации о себе.');
       return true;
@@ -428,6 +502,13 @@ const handleRegistrationText = async (ctx) => {
     // Создаем заявку на регистрацию
     try {
       const { notificationService } = require('../services/NotificationService');
+      
+      // Отменяем таймер напоминания, так как пользователь отправил заявку
+      const telegramId = ctx.session.registrationData.telegram_id;
+      if (registrationReminders.has(telegramId)) {
+        clearTimeout(registrationReminders.get(telegramId));
+        registrationReminders.delete(telegramId);
+      }
       
       const registrationRequest = await RegistrationRequest.create({
         telegram_id: ctx.session.registrationData.telegram_id,

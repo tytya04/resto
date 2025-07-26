@@ -66,13 +66,18 @@ const pendingOrders = async (ctx) => {
         message += `👤 ${order.user.first_name || order.user.username}\n`;
         message += `📦 Позиций: ${order.orderItems.length}\n`;
         message += `💰 Сумма: ${order.total_amount || 'не указана'} ₽\n`;
-        message += `/process_order_${order.id}\n`;
       });
     });
 
-    message += '\n\n💡 Нажмите на команду под заказом для начала обработки';
+    const keyboard = {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🔙 Назад', callback_data: 'orders_back' }]
+        ]
+      }
+    };
 
-    await ctx.reply(message, { parse_mode: 'HTML' });
+    await ctx.reply(message, { parse_mode: 'HTML', ...keyboard });
     
   } catch (error) {
     logger.error('Error in pendingOrders:', error);
@@ -402,6 +407,9 @@ const handleTextCommands = async (ctx) => {
   // Логируем для отладки
   logger.info('Manager handleTextCommands called', {
     text,
+    userId: ctx.from?.id,
+    userName: ctx.from?.username,
+    userRole: ctx.user?.role,
     session: {
       creatingRestaurant: ctx.session?.creatingRestaurant,
       editingRestaurant: ctx.session?.editingRestaurant,
@@ -526,6 +534,7 @@ const handleTextCommands = async (ctx) => {
   
   switch (text) {
     case '📋 Заявки':
+      logger.info('Processing "Заявки" command for manager');
       return ordersSubmenu(ctx);
     case '👥 Управление пользователями':
       // Вызываем функцию управления пользователями из adminHandlers
@@ -536,7 +545,7 @@ const handleTextCommands = async (ctx) => {
     case '📊 Статистика':
       return statistics(ctx);
     case '📑 Сводка заказов':
-      return consolidatedOrders(ctx);
+      return consolidatedOrdersList(ctx);
     case '💰 Рентабельность':
       // Передаем управление в analytics handler
       return false;
@@ -717,6 +726,12 @@ const restaurantsList = async (ctx) => {
 
 // Подменю заявок
 const ordersSubmenu = async (ctx) => {
+  logger.info('ordersSubmenu called', {
+    userId: ctx.from?.id,
+    userName: ctx.from?.username,
+    userRole: ctx.user?.role
+  });
+  
   try {
     const { RegistrationRequest } = require('../database/models');
     
@@ -745,20 +760,18 @@ const ordersSubmenu = async (ctx) => {
       reply_markup: {
         inline_keyboard: [
           [
-            { text: `📥 Новые заявки${newOrdersCount > 0 ? ` (${newOrdersCount})` : ''}`, callback_data: 'orders_new' },
-            { text: `⏳ В обработке${processingCount > 0 ? ` (${processingCount})` : ''}`, callback_data: 'orders_processing' }
+            { text: `📥 Новые заявки${newOrdersCount > 0 ? ` (${newOrdersCount})` : ''}`, callback_data: 'orders_new' }
           ],
           [
-            { text: '✅ Одобренные', callback_data: 'orders_approved' },
-            { text: '❌ Отклонённые', callback_data: 'orders_rejected' }
+            { text: '📊 Консолидированный список', callback_data: 'manager_consolidated' }
           ],
-          [
+          registrationCount > 0 ? [
             { text: `👥 Заявки на регистрацию${registrationCount > 0 ? ` (${registrationCount})` : ''}`, callback_data: 'admin_users_pending' }
-          ],
+          ] : [],
           [
             { text: '🔙 Назад в меню', callback_data: 'menu_back' }
           ]
-        ]
+        ].filter(row => row.length > 0)
       }
     };
     
@@ -903,7 +916,7 @@ const handleManagerCallbacks = async (ctx) => {
     if (action.startsWith('manager_schedule_add:')) {
       const restaurantId = parseInt(action.split(':')[1]);
       await ctx.answerCbQuery();
-      await ctx.scene.enter('addScheduleScene', { restaurantId });
+      await ctx.scene.enter('add_schedule', { restaurantId });
       return;
     }
     
@@ -1440,6 +1453,126 @@ const consolidatedOrders = async (ctx) => {
   }
 };
 
+// Экспорт консолидированного списка в Excel
+const exportConsolidated = async (ctx) => {
+  try {
+    await ctx.answerCbQuery('Подготавливаю файл...');
+    
+    // Получаем консолидированные заказы
+    const consolidated = await OrderService.getConsolidatedOrders(null, null, true);
+    
+    if (consolidated.length === 0) {
+      return ctx.reply('📋 Нет данных для экспорта');
+    }
+    
+    // Формируем CSV данные
+    let csv = 'Категория,Продукт,Количество,Единица,Цена за единицу,Сумма,Количество заказов\n';
+    
+    consolidated.forEach(item => {
+      const category = item.category || 'Без категории';
+      const price = item.average_price || 0;
+      const sum = item.total_quantity * price;
+      
+      csv += `"${category}","${item.product_name}",${item.total_quantity},"${item.unit}",${price},${sum},${item.orders_count}\n`;
+    });
+    
+    // Конвертируем в Buffer
+    const buffer = Buffer.from(csv, 'utf-8');
+    
+    // Генерируем имя файла с датой
+    const date = new Date().toISOString().split('T')[0];
+    const filename = `consolidated_orders_${date}.csv`;
+    
+    // Отправляем файл
+    await ctx.replyWithDocument({
+      source: buffer,
+      filename: filename
+    }, {
+      caption: '📊 Консолидированный список обработанных заказов\n\n' +
+               '💡 Файл в формате CSV, можно открыть в Excel'
+    });
+    
+  } catch (error) {
+    logger.error('Error in exportConsolidated:', error);
+    ctx.reply('❌ Произошла ошибка при экспорте данных');
+  }
+};
+
+// Консолидированный список заказов для менеджера (новая версия)
+const consolidatedOrdersList = async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+    
+    // Получаем консолидированные заказы только обработанные менеджером
+    const consolidated = await OrderService.getConsolidatedOrders(null, null, true);
+    
+    if (consolidated.length === 0) {
+      return ctx.reply('📋 Нет обработанных заказов для консолидации');
+    }
+    
+    let message = '📊 <b>Консолидированный список обработанных заказов</b>\n\n';
+    message += '📅 <i>Период: последние 7 дней</i>\n\n';
+    
+    // Группируем по категориям
+    const byCategory = {};
+    let totalSum = 0;
+    
+    consolidated.forEach(item => {
+      const category = item.category || 'Без категории';
+      if (!byCategory[category]) {
+        byCategory[category] = [];
+      }
+      byCategory[category].push(item);
+      
+      // Подсчитываем общую сумму
+      if (item.average_price > 0) {
+        totalSum += item.total_quantity * item.average_price;
+      }
+    });
+    
+    // Выводим по категориям
+    Object.entries(byCategory).forEach(([category, items]) => {
+      message += `<b>📂 ${category}</b>\n`;
+      
+      items.forEach(item => {
+        message += `• <b>${item.product_name}</b>: ${item.total_quantity} ${item.unit}`;
+        
+        if (item.orders_count > 1) {
+          message += ` (из ${item.orders_count} заказов)`;
+        }
+        
+        if (item.average_price > 0) {
+          const itemSum = item.total_quantity * item.average_price;
+          message += ` ~${itemSum.toFixed(2)} ₽`;
+        }
+        
+        message += '\n';
+      });
+      
+      message += '\n';
+    });
+    
+    if (totalSum > 0) {
+      message += `\n💰 <b>Примерная общая сумма:</b> ${totalSum.toFixed(2)} ₽\n`;
+    }
+    
+    const keyboard = {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '📤 Экспорт в Excel', callback_data: 'manager_export_consolidated' }],
+          [{ text: '🔙 Назад', callback_data: 'menu_orders' }]
+        ]
+      }
+    };
+    
+    await ctx.editMessageText(message, { parse_mode: 'HTML', ...keyboard });
+    
+  } catch (error) {
+    logger.error('Error in consolidatedOrders:', error);
+    ctx.reply('❌ Произошла ошибка при получении консолидированного списка');
+  }
+};
+
 module.exports = {
   menu,
   pendingOrders,
@@ -1459,5 +1592,7 @@ module.exports = {
   showScheduleDetails,
   handleManagerCallbacks,
   showEditRestaurantMenu,
-  consolidatedOrders
+  consolidatedOrders,
+  consolidatedOrdersList,
+  exportConsolidated
 };

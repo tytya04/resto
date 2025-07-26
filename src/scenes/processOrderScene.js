@@ -4,6 +4,7 @@ const OrderService = require('../services/OrderService');
 const OrderFormatter = require('../utils/orderFormatter');
 const logger = require('../utils/logger');
 const { notificationService } = require('../services/NotificationService');
+const { formatInTimezone } = require('../utils/timezone');
 
 // Сцена обработки заявки менеджером
 const processOrderScene = new Scenes.BaseScene('process_order');
@@ -26,13 +27,33 @@ processOrderScene.enter(async (ctx) => {
       return ctx.scene.leave();
     }
     
-    if (order.status !== 'sent') {
-      await ctx.reply('⚠️ Этот заказ уже обрабатывается или завершен');
+    // Логируем для отладки
+    logger.info('Order loaded:', {
+      orderId: order.id,
+      orderNumber: order.order_number,
+      itemsCount: order.orderItems ? order.orderItems.length : 0,
+      status: order.status
+    });
+    
+    // Для continue_process разрешаем обработку заказов в статусе processing
+    const isProcessing = order.status === 'processing' && order.processed_by === ctx.user.id;
+    const isSent = order.status === 'sent';
+    
+    if (!isSent && !isProcessing) {
+      await ctx.reply('⚠️ Этот заказ уже завершен или обрабатывается другим менеджером');
       return ctx.scene.leave();
     }
     
-    // Обновляем статус на "в обработке"
-    await OrderService.updateOrderStatus(orderId, 'processing', ctx.user.id);
+    // Проверяем наличие позиций
+    if (!order.orderItems || order.orderItems.length === 0) {
+      await ctx.reply('❌ В заказе нет позиций');
+      return ctx.scene.leave();
+    }
+    
+    // Обновляем статус на "в обработке" только если заказ еще не обрабатывается
+    if (order.status === 'sent') {
+      await OrderService.updateOrderStatus(orderId, 'processing', ctx.user.id);
+    }
     
     // Сохраняем данные заказа в сессии сцены
     ctx.scene.session.order = order;
@@ -170,7 +191,7 @@ async function showOrderSummary(ctx) {
   let message = `📋 <b>Итоговая информация по заказу #${order.order_number}</b>\n\n`;
   message += `🏢 Ресторан: ${order.restaurant.name}\n`;
   message += `👤 Заказал: ${order.user.first_name || order.user.username}\n`;
-  message += `📅 Дата: ${new Date(order.created_at).toLocaleDateString('ru-RU')}\n\n`;
+  message += `📅 Дата: ${formatInTimezone(order.created_at, 'DD.MM.YYYY HH:mm')}\n\n`;
   
   message += '<b>Позиции заказа:</b>\n';
   let totalAmount = 0;
@@ -505,7 +526,11 @@ processOrderScene.action(/^generate_torg12_after:(\d+)$/, async (ctx) => {
 processOrderScene.action('done', async (ctx) => {
   await ctx.answerCbQuery();
   await ctx.editMessageText('✅ Обработка заказа завершена');
-  return ctx.scene.leave();
+  await ctx.scene.leave();
+  
+  // Показываем главное меню менеджера
+  const registrationHandlers = require('../handlers/registration');
+  return registrationHandlers.showMainMenu(ctx, ctx.user);
 });
 
 // Выход из сцены

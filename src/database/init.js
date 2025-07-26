@@ -10,6 +10,11 @@ const initDatabase = async () => {
     // Включаем поддержку внешних ключей для SQLite
     await sequelize.query('PRAGMA foreign_keys = ON;');
     logger.info('Foreign keys support enabled');
+    
+    // Включаем WAL режим для лучшей производительности и избежания блокировок
+    await sequelize.query('PRAGMA journal_mode = WAL;');
+    await sequelize.query('PRAGMA busy_timeout = 5000;');
+    logger.info('WAL mode and busy timeout enabled');
 
     // Синхронизация моделей с БД
     await sequelize.sync({ alter: false });
@@ -108,7 +113,7 @@ const initDatabase = async () => {
 };
 
 // Функция для генерации номера заказа
-const generateOrderNumber = async () => {
+const generateOrderNumber = async (transaction = null) => {
   const date = new Date();
   const year = date.getFullYear().toString().substr(-2);
   const month = (date.getMonth() + 1).toString().padStart(2, '0');
@@ -119,7 +124,8 @@ const generateOrderNumber = async () => {
       sequelize.fn('substr', sequelize.col('order_number'), 1, 6),
       `${year}${month}${day}`
     ),
-    order: [['order_number', 'DESC']]
+    order: [['order_number', 'DESC']],
+    transaction
   });
 
   let sequence = 1;
@@ -132,32 +138,35 @@ const generateOrderNumber = async () => {
 };
 
 // Хук для автоматической генерации номера заказа
-Order.beforeCreate(async (order) => {
+Order.beforeCreate(async (order, options) => {
   if (!order.order_number) {
-    order.order_number = await generateOrderNumber();
+    order.order_number = await generateOrderNumber(options.transaction);
   }
 });
 
 // Хук для пересчета суммы заказа
-OrderItem.afterCreate(async (item) => {
-  await recalculateOrderTotal(item.order_id);
+OrderItem.afterCreate(async (item, options) => {
+  await recalculateOrderTotal(item.order_id, options.transaction);
 });
 
-OrderItem.afterUpdate(async (item) => {
-  await recalculateOrderTotal(item.order_id);
+OrderItem.afterUpdate(async (item, options) => {
+  await recalculateOrderTotal(item.order_id, options.transaction);
 });
 
-OrderItem.afterDestroy(async (item) => {
-  await recalculateOrderTotal(item.order_id);
+OrderItem.afterDestroy(async (item, options) => {
+  await recalculateOrderTotal(item.order_id, options.transaction);
 });
 
-const recalculateOrderTotal = async (orderId) => {
-  const items = await OrderItem.findAll({ where: { order_id: orderId } });
+const recalculateOrderTotal = async (orderId, transaction = null) => {
+  const items = await OrderItem.findAll({ 
+    where: { order_id: orderId },
+    transaction 
+  });
   const total = items.reduce((sum, item) => sum + (parseFloat(item.total) || 0), 0);
   
   await Order.update(
     { total_amount: total },
-    { where: { id: orderId } }
+    { where: { id: orderId }, transaction }
   );
 };
 

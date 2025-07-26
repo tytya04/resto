@@ -7,6 +7,42 @@ const addScheduleScene = new Scenes.WizardScene(
   // Шаг 1: Выбор ресторана
   async (ctx) => {
     try {
+      // Проверяем, передан ли restaurantId из контекста менеджера
+      const passedRestaurantId = ctx.scene.state?.restaurantId;
+      
+      if (passedRestaurantId) {
+        // Если ID передан, сразу используем этот ресторан
+        const restaurant = await Restaurant.findByPk(passedRestaurantId);
+        
+        if (!restaurant || !restaurant.is_active) {
+          await ctx.reply('❌ Ресторан не найден или неактивен.');
+          return ctx.scene.leave();
+        }
+        
+        ctx.wizard.state.selectedRestaurantId = restaurant.id;
+        ctx.wizard.state.selectedRestaurantName = restaurant.name;
+        
+        // Сразу переходим к выбору времени
+        const keyboard = {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '❌ Отмена', callback_data: 'cancel' }]
+            ]
+          }
+        };
+        
+        await ctx.reply(
+          `📅 <b>Настройка расписания для ресторана "${restaurant.name}"</b>\n\n` +
+          `Введите время отправки заказа в формате ЧЧ:ММ\n` +
+          `Например: 09:00\n\n` +
+          `<i>Для отмены введите /cancel</i>`,
+          { parse_mode: 'HTML', ...keyboard }
+        );
+        
+        return ctx.wizard.next();
+      }
+      
+      // Если ID не передан, показываем список ресторанов (для админа)
       const restaurants = await Restaurant.findAll({
         where: { is_active: true },
         order: [['name', 'ASC']]

@@ -74,18 +74,18 @@ class NotificationService {
           `📦 Всего позиций: ${items.length}`;
         
         const options = {
-          parse_mode: 'HTML',
-          reply_markup: {
-            inline_keyboard: [
-              [{ 
-                text: '📋 Обработать заказ', 
-                callback_data: `process_order:${order.id}` 
-              }]
-            ]
-          }
+          parse_mode: 'HTML'
         };
         
-        return await this.notifyManagersWithMessage(message, options);
+        // Уведомляем менеджеров
+        const managersNotified = await this.notifyManagersWithMessage(message, options);
+        
+        // Также уведомляем закупщиков
+        const buyersNotified = await this.notifyBuyers(message, options);
+        
+        logger.info(`Order notification sent to ${managersNotified} managers and ${buyersNotified} buyers`);
+        
+        return managersNotified + buyersNotified;
       } else if (typeof order === 'string') {
         // Если передана строка, используем как сообщение
         return await this.notifyManagersWithMessage(order, draftOrder || {});

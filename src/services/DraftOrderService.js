@@ -1,11 +1,30 @@
 const { DraftOrder, DraftOrderItem, User, Restaurant, RestaurantBranch, NomenclatureCache, ScheduledOrder, sequelize } = require('../database/models');
-const { Op } = require('sequelize');
+const { Op, Transaction } = require('sequelize');
 const logger = require('../utils/logger');
 const moment = require('moment');
 const { momentInTimezone, toUTC } = require('../utils/timezone');
 const productMatcher = require('./ProductMatcher');
 
 class DraftOrderService {
+  /**
+   * Выполнить операцию с повторными попытками при SQLITE_BUSY
+   */
+  async executeWithRetry(operation, maxRetries = 3, delay = 1000) {
+    for (let i = 0; i < maxRetries; i++) {
+      try {
+        return await operation();
+      } catch (error) {
+        if (error.message.includes('SQLITE_BUSY') && i < maxRetries - 1) {
+          logger.warn(`SQLITE_BUSY detected, retry ${i + 1}/${maxRetries} after ${delay}ms`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          delay *= 1.5; // Увеличиваем задержку с каждой попыткой
+        } else {
+          throw error;
+        }
+      }
+    }
+  }
+
   /**
    * Получить или создать черновик заказа на сегодня
    */
@@ -18,7 +37,7 @@ class DraftOrderService {
       };
       
       if (branchId) {
-        where.branchId = branchId;
+        where.branch_id = branchId;
       }
       
       let draftOrder = await DraftOrder.findOne({
@@ -32,6 +51,10 @@ class DraftOrderService {
               model: NomenclatureCache,
               as: 'matchedProduct'
             }]
+          },
+          {
+            model: RestaurantBranch,
+            as: 'branch'
           }
         ],
         order: [
@@ -75,7 +98,7 @@ class DraftOrderService {
         };
         
         if (branchId) {
-          existingWhere.branchId = branchId;
+          existingWhere.branch_id = branchId;
         }
         
         const existingOnDate = await DraftOrder.findOne({
@@ -95,7 +118,7 @@ class DraftOrderService {
             
             draftOrder = await DraftOrder.create({
               restaurant_id: restaurantId,
-              branchId: branchId,
+              branch_id: branchId,
               user_id: userId,
               scheduled_for: newScheduledTime,
               status: 'draft'
@@ -112,7 +135,7 @@ class DraftOrderService {
           
           draftOrder = await DraftOrder.create({
             restaurant_id: restaurantId,
-            branchId: branchId,
+            branch_id: branchId,
             user_id: userId,
             scheduled_for: nextScheduledTime,
             status: 'draft'
@@ -254,6 +277,17 @@ class DraftOrderService {
           continue;
         }
 
+        logger.info('Parsed product line:', {
+          line,
+          parsed: {
+            name: parsed.name,
+            quantity: parsed.quantity,
+            unit: parsed.unit,
+            needsUnitClarification: parsed.needsUnitClarification,
+            possibleUnits: parsed.possibleUnits
+          }
+        });
+
         // Если нужно уточнение единицы измерения
         if (parsed.needsUnitClarification) {
           logger.info('Product needs unit clarification:', {
@@ -346,6 +380,24 @@ class DraftOrderService {
             });
             logger.info('Duplicate found:', { productName: matchedProduct.product_name });
           } else {
+            // Проверяем, нужно ли уточнить единицу измерения
+            const { getPossibleUnits } = require('../config/productUnits');
+            const possibleUnits = getPossibleUnits(matchedProduct.product_name);
+            
+            // Если единица не указана и есть несколько вариантов - запрашиваем уточнение
+            if (!parsed.unit && possibleUnits.length > 1) {
+              results.needsUnitClarification.push({
+                line,
+                parsed: {
+                  ...parsed,
+                  name: matchedProduct.product_name,
+                  possibleUnits,
+                  matchedProductId: matchedProduct.id
+                }
+              });
+              continue;
+            }
+            
             // Продукт найден - добавляем с соответствием
             const item = await DraftOrderItem.create({
               draft_order_id: draftOrderId,
@@ -469,6 +521,11 @@ class DraftOrderService {
           if (name) {
             if (!unit) {
               const possibleUnits = getPossibleUnits(name);
+              logger.info('parseProductLine - checking units:', {
+                name: name.trim(),
+                possibleUnits,
+                count: possibleUnits.length
+              });
               if (possibleUnits.length === 1) {
                 unit = possibleUnits[0];
               } else {
@@ -680,7 +737,17 @@ class DraftOrderService {
    * Преобразовать черновик в заказ
    */
   async convertToOrder(draftOrderId) {
-    const transaction = await sequelize.transaction();
+    // Оборачиваем в повторные попытки для обработки SQLITE_BUSY
+    return this.executeWithRetry(async () => {
+      return this._convertToOrderInternal(draftOrderId);
+    });
+  }
+
+  async _convertToOrderInternal(draftOrderId) {
+    const transaction = await sequelize.transaction({
+      isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
+      autocommit: false
+    });
     
     try {
       const draftOrder = await DraftOrder.findByPk(draftOrderId, {
@@ -690,7 +757,9 @@ class DraftOrderService {
           where: {
             status: { [Op.in]: ['matched', 'confirmed'] }
           }
-        }]
+        }],
+        transaction,
+        lock: Transaction.LOCK.UPDATE
       });
 
       if (!draftOrder || !draftOrder.draftOrderItems.length) {
@@ -698,7 +767,7 @@ class DraftOrderService {
       }
 
       // Создаем заказ
-      const { Order } = require('../database/models');
+      const { Order, OrderItem } = require('../database/models');
       const order = await Order.create({
         restaurant_id: draftOrder.restaurant_id,
         user_id: draftOrder.user_id,
@@ -710,8 +779,26 @@ class DraftOrderService {
           unit: item.unit,
           product_id: item.matched_product_id
         }))),
-        total_amount: 0
+        total_amount: 0,
+        branch_id: draftOrder.branch_id
       }, { transaction });
+      
+      // Создаем позиции заказа с отключенными хуками
+      for (const draftItem of draftOrder.draftOrderItems) {
+        await OrderItem.create({
+          order_id: order.id,
+          product_name: draftItem.product_name,
+          quantity: draftItem.quantity,
+          unit: draftItem.unit,
+          price: null, // Цена будет установлена менеджером
+          total: 0,
+          matched_product_id: draftItem.matched_product_id,
+          status: 'pending'
+        }, { 
+          transaction,
+          hooks: false // Отключаем хуки чтобы избежать конфликтов с транзакцией
+        });
+      }
 
       // Обновляем статус черновика
       draftOrder.status = 'sent';

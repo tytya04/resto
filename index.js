@@ -118,6 +118,18 @@ bot.use(session({
 }));
 bot.use(stage.middleware());
 
+// Самый первый middleware для отладки
+bot.use(async (ctx, next) => {
+  logger.info('=== INCOMING UPDATE ===', {
+    updateType: ctx.updateType,
+    from: ctx.from,
+    message: ctx.message?.text,
+    callback: ctx.callbackQuery?.data,
+    timestamp: new Date().toISOString()
+  });
+  return next();
+});
+
 // Middleware для логирования и мониторинга
 bot.use(authMiddleware);
 bot.use(loggerMiddleware);
@@ -140,7 +152,102 @@ bot.use(async (ctx, next) => {
 
 // Команды регистрации и профиля
 bot.command('start', registrationHandlers.startCommand);
+bot.command('refresh', registrationHandlers.startCommand);
 bot.command('profile', registrationHandlers.profileCommand);
+bot.command('fixmenu', async (ctx) => {
+  logger.info('fixmenu command received', {
+    userId: ctx.from?.id,
+    username: ctx.from?.username
+  });
+  
+  if (!ctx.user) {
+    return ctx.reply('❌ Необходима авторизация');
+  }
+  
+  // Отправляем правильное меню для роли пользователя
+  const { showMainMenu } = require('./src/handlers/registration');
+  await showMainMenu(ctx, ctx.user);
+  
+  return ctx.reply('✅ Меню обновлено!');
+});
+
+// Простая тестовая команда
+bot.command('test', async (ctx) => {
+  logger.info('Test command received', {
+    userId: ctx.from?.id,
+    username: ctx.from?.username
+  });
+  return ctx.reply('✅ Бот работает!');
+});
+
+// Команда для сброса кэша пользователя
+bot.command('reset', async (ctx) => {
+  logger.info('Reset command received', {
+    userId: ctx.from?.id,
+    username: ctx.from?.username
+  });
+  
+  // Очищаем сессию
+  ctx.session = {};
+  
+  // Перезагружаем данные пользователя из БД
+  const { User, Restaurant } = require('./src/database/models');
+  const user = await User.findOne({
+    where: { telegram_id: ctx.from.id },
+    include: [{
+      model: Restaurant,
+      as: 'restaurant'
+    }]
+  });
+  
+  if (!user) {
+    return ctx.reply('❌ Пользователь не найден в базе данных');
+  }
+  
+  // Устанавливаем правильные данные в контекст
+  ctx.user = user;
+  
+  // Показываем правильное меню
+  const { showMainMenu } = require('./src/handlers/registration');
+  await showMainMenu(ctx, user);
+  
+  return ctx.reply(`✅ Данные сброшены!\n\nВаша роль: ${user.role}\nРесторан: ${user.restaurant?.name || 'Не указан'}`);
+});
+
+// Команда для проверки конкретного пользователя
+bot.command('checkuser', async (ctx) => {
+  const telegramId = 6968529444; // ID пользователя Сон
+  
+  try {
+    // Пробуем отправить сообщение
+    await bot.telegram.sendMessage(telegramId, 
+      '🔧 Тестовое сообщение от бота.\n\n' +
+      'Если вы видите это сообщение, значит бот может вам отправлять сообщения.\n\n' +
+      'Попробуйте отправить команду /start'
+    );
+    
+    return ctx.reply('✅ Тестовое сообщение отправлено пользователю Сон');
+  } catch (error) {
+    logger.error('Error sending message to user:', error);
+    return ctx.reply(`❌ Ошибка отправки сообщения: ${error.message}`);
+  }
+});
+
+// Команда отмены для выхода из любой сцены
+bot.command('cancel', async (ctx) => {
+  if (ctx.scene && ctx.scene.current) {
+    await ctx.scene.leave();
+    await ctx.reply('❌ Операция отменена');
+    
+    // Показываем главное меню
+    const user = ctx.session?.user || ctx.user;
+    if (user) {
+      return registrationHandlers.showMainMenu(ctx, user);
+    }
+  } else {
+    await ctx.reply('❌ Нет активной операции для отмены');
+  }
+});
 
 // Команда help - показывает доступные команды
 bot.command('help', async (ctx) => {
@@ -374,12 +481,75 @@ bot.action('menu_reports', requireRole('buyer'), procurementHandlers.reports);
 // Обработчики для подменю заявок
 bot.action('menu_orders', requireRole('manager'), managerHandlers.ordersSubmenu);
 bot.action('orders_new', requireRole('manager'), managerHandlers.pendingOrders);
+bot.action('orders_back', requireRole('manager'), managerHandlers.ordersSubmenu);
 bot.action('orders_processing', requireRole('manager'), managerHandlers.processingOrders);
 bot.action('orders_approved', requireRole('manager'), managerHandlers.approvedOrders);
 bot.action('orders_rejected', requireRole('manager'), managerHandlers.rejectedOrders);
+bot.action('manager_consolidated', requireRole('manager'), managerHandlers.consolidatedOrdersList);
+bot.action('manager_export_consolidated', requireRole('manager'), managerHandlers.exportConsolidated);
 
 // Обработчики для филиалов
 const { handleBranchAddressText, manageBranches, handleAddBranch, handleBranchCallbacks } = require('./src/handlers/restaurantBranch');
+const { formatInTimezone } = require('./src/utils/timezone');
+
+// Новый обработчик для выбора филиала при создании заказа
+bot.action(/^create_order_branch:(\d+)$/, requireRole('restaurant'), async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+    
+    const branchId = parseInt(ctx.match[1]);
+    const user = ctx.user;
+    const restaurantId = user.restaurant_id;
+    
+    // Получаем или создаем черновик для выбранного филиала
+    const draft = await draftOrderService.getOrCreateDraftOrder(restaurantId, user.id, branchId);
+    
+    // Сохраняем информацию в сессии
+    ctx.session = ctx.session || {};
+    ctx.session.addingProducts = true;
+    ctx.session.draftOrderId = draft.id;
+    ctx.session.selectedBranchId = branchId;
+    
+    // Формируем сообщение
+    const scheduledTime = formatInTimezone(draft.scheduled_for);
+    let message = '🛒 <b>Добавление продуктов в заказ</b>\n\n';
+    message += `📅 Заказ будет отправлен: ${scheduledTime}\n\n`;
+    
+    if (draft.draftOrderItems && draft.draftOrderItems.length > 0) {
+      message += `📦 В заказе уже есть ${draft.draftOrderItems.length} позиций\n\n`;
+    }
+    
+    message += '📝 Отправьте список продуктов в любом формате:\n\n';
+    message += '<b>Примеры:</b>\n';
+    message += '<code>Картофель 50 кг</code>\n';
+    message += '<code>Морковь - 30 - кг</code>\n';
+    message += '<code>Лук 20 кг\nПомидоры 15 кг</code>\n\n';
+    message += '💡 <i>Можете отправлять по одному продукту или списком</i>\n';
+    message += '💡 <i>Все продукты будут добавлены в один заказ</i>\n\n';
+    
+    const keyboard = {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🔍 Поиск в каталоге', callback_data: 'draft_search' }],
+          [{ text: '📋 Посмотреть текущий заказ', callback_data: 'draft_view' }],
+          [{ text: '🏢 Сменить филиал', callback_data: 'menu_create_order' }],
+          [{ text: '❌ Отмена', callback_data: 'draft_cancel' }]
+        ]
+      }
+    };
+    
+    await ctx.editMessageText(message, {
+      parse_mode: 'HTML',
+      ...keyboard
+    });
+    
+  } catch (error) {
+    logger.error('Error creating order for branch:', error);
+    await ctx.reply('❌ Ошибка при создании заказа');
+  }
+});
+
+// Старый обработчик оставляем для совместимости
 bot.action(/^select_branch_for_order:(\d+)$/, requireRole('restaurant'), async (ctx) => {
   try {
     await ctx.answerCbQuery();
@@ -525,6 +695,21 @@ bot.action('purchases_stats', requireRole('buyer'), procurementHandlers.purchase
 bot.action('report_price_history', requireRole('buyer'), analyticsHandlers.priceHistory);
 bot.action('report_profitability', requireRole('buyer'), analyticsHandlers.profitabilityReport);
 bot.action('report_order_analysis', requireRole('buyer'), analyticsHandlers.orderCostAnalysis);
+
+// Обработчики для функций закупщика (buyerHandlers)
+const buyerHandlers = require('./src/handlers/buyerHandlers');
+bot.action('buyer_start_purchase', requireRole('buyer'), buyerHandlers.handleCallbacks);
+bot.action('buyer_next_product', requireRole('buyer'), buyerHandlers.handleCallbacks);
+bot.action('buyer_show_list', requireRole('buyer'), buyerHandlers.handleCallbacks);
+bot.action('buyer_start_packing', requireRole('buyer'), buyerHandlers.handleCallbacks);
+bot.action('buyer_next_pack_item', requireRole('buyer'), buyerHandlers.handleCallbacks);
+bot.action('buyer_skip_product', requireRole('buyer'), buyerHandlers.handleCallbacks);
+bot.action('buyer_cancel_purchase', requireRole('buyer'), buyerHandlers.handleCallbacks);
+bot.action('buyer_cancel_packing', requireRole('buyer'), buyerHandlers.handleCallbacks);
+bot.action('buyer_export_consolidated', requireRole('buyer'), buyerHandlers.handleCallbacks);
+bot.action(/^buyer_purchase_exact:/, requireRole('buyer'), buyerHandlers.handleCallbacks);
+bot.action(/^buyer_pack_exact:/, requireRole('buyer'), buyerHandlers.handleCallbacks);
+bot.action(/^buyer_pack_zero/, requireRole('buyer'), buyerHandlers.handleCallbacks);
 
 // Обработчики для кнопок менеджера
 bot.action('manager_analytics', requireRole('manager'), async (ctx) => {
@@ -696,16 +881,24 @@ bot.action(/^draft_edit_item:(\d+)$/, requireRole('restaurant'), draftOrderHandl
 bot.action(/^draft_change_qty:(\d+)$/, requireRole('restaurant'), draftOrderHandlers.changeDraftItemQuantity);
 bot.action(/^draft_match:(\d+):(\d+)$/, requireRole('restaurant'), draftOrderHandlers.confirmProductMatch);
 bot.action(/^draft_remove:(\d+)$/, requireRole('restaurant'), draftOrderHandlers.removeItem);
+bot.action(/^unit_clarify:(.+):(.+)(?::(.+))?$/, requireRole('restaurant'), draftOrderHandlers.handleUnitClarification);
 bot.action(/^draft_search_for:(\d+)$/, requireRole('restaurant'), async (ctx) => {
   await ctx.answerCbQuery();
   ctx.session.searchingForItem = ctx.callbackQuery.data.split(':')[1];
   return productSearchHandlers.startProductSearch(ctx);
 });
-bot.action(/^unit_clarify:(.+):(.+):(.+)$/, requireRole('restaurant'), draftOrderHandlers.handleUnitClarification);
 bot.action(/^unit_duplicate:(\d+):(.+):(.+)$/, requireRole('restaurant'), draftOrderHandlers.handleUnitDuplicate);
 bot.action(/^duplicate_add:(\d+):(.+?)(?::(.+))?$/, requireRole('restaurant'), draftOrderHandlers.handleDuplicateAdd);
 bot.action(/^duplicate_replace:(\d+):(.+?)(?::(.+))?$/, requireRole('restaurant'), draftOrderHandlers.handleDuplicateReplace);
 bot.action(/^duplicate_cancel:(\d+)$/, requireRole('restaurant'), draftOrderHandlers.handleDuplicateCancel);
+
+// Обработчики для неподтвержденных позиций
+bot.action('draft_edit_unmatched', requireRole('restaurant'), draftOrderHandlers.editUnmatchedItems);
+bot.action(/^draft_confirm_item:(\d+)$/, requireRole('restaurant'), draftOrderHandlers.confirmDraftItem);
+bot.action(/^draft_match_item:(\d+):(\d+)$/, requireRole('restaurant'), draftOrderHandlers.matchDraftItem);
+bot.action(/^draft_no_match:(\d+)$/, requireRole('restaurant'), draftOrderHandlers.confirmDraftItem);
+bot.action('draft_remove_unmatched', requireRole('restaurant'), draftOrderHandlers.removeUnmatchedItems);
+bot.action('draft_confirm_remove_unmatched', requireRole('restaurant'), draftOrderHandlers.confirmRemoveUnmatched);
 
 // Обработчики callback для действий с продуктами
 bot.action(/^add_to_order:(.+)$/, productSearchHandlers.handleAddToOrder);
@@ -784,6 +977,10 @@ bot.hears('📋 Меню менеджера', requireRole('manager'), async (ctx
 });
 
 bot.hears('📋 Заявки', requireRole('manager'), async (ctx) => {
+  logger.info('Processing "Заявки" command in index.js for manager', {
+    userId: ctx.from?.id,
+    userName: ctx.from?.username
+  });
   // Вызываем функцию подменю заявок
   return managerHandlers.ordersSubmenu(ctx);
 });
@@ -849,6 +1046,8 @@ bot.on('text', async (ctx) => {
   logger.info('Text message handler', {
     text: ctx.message.text,
     userId: ctx.from.id,
+    userName: ctx.from.username,
+    userRole: ctx.user?.role,
     hasSession: !!ctx.session,
     sessionData: ctx.session
   });
@@ -1050,6 +1249,28 @@ bot.on('text', async (ctx) => {
     if (handled) return;
   }
   
+  // Проверяем неправильные команды для ресторана
+  if (ctx.user && ctx.user.role === 'restaurant') {
+    const managerCommands = ['📋 Заявки', '📋 Меню менеджера', '👥 Управление пользователями', '📊 Статистика'];
+    if (managerCommands.includes(text)) {
+      await ctx.reply(
+        '❌ Эта команда недоступна для ресторана.\n\n' +
+        '✅ Вот ваше правильное меню:',
+        Markup.keyboard([
+          ['🛒 Создать заказ', '📋 Мои заказы'],
+          ['🔍 Поиск продуктов', '🏢 Мои филиалы'],
+          ['👤 Профиль']
+        ]).resize()
+      );
+      
+      // Показываем главное меню
+      const { showMainMenu } = require('./src/handlers/registration');
+      await showMainMenu(ctx, ctx.user);
+      
+      return;
+    }
+  }
+  
   // Проверяем команды email настроек
   if (ctx.user && ctx.user.role === 'manager') {
     const text = ctx.message.text;
@@ -1089,7 +1310,7 @@ bot.on('text', async (ctx) => {
   
   // Проверяем команды закупщика
   if (ctx.user && ctx.user.role === 'buyer') {
-    const handled = await procurementHandlers.handleTextCommands(ctx);
+    const handled = await buyerHandlers.handleTextCommands(ctx);
     if (handled) return;
   }
   
@@ -1243,6 +1464,44 @@ bot.on('text', async (ctx) => {
   
   if (text === '🔍 Поиск продуктов' && ctx.user && ctx.user.role === 'restaurant') {
     return productSearchHandlers.startProductSearch(ctx);
+  }
+  
+  if (text === '📋 Мои заказы' && ctx.user && ctx.user.role === 'restaurant') {
+    return restaurantHandlers.myOrders(ctx);
+  }
+  
+  if (text === '🏢 Мои филиалы' && ctx.user && ctx.user.role === 'restaurant') {
+    const { RestaurantBranch } = require('./src/database/models');
+    const branches = await RestaurantBranch.findAll({
+      where: { 
+        restaurantId: ctx.user.restaurant_id,
+        isActive: true
+      },
+      order: [
+        ['isMain', 'DESC'],
+        ['address', 'ASC']
+      ]
+    });
+    
+    let message = '🏢 <b>Мои филиалы:</b>\n\n';
+    
+    if (branches.length === 0) {
+      message += '<i>У вас еще нет филиалов</i>\n';
+    } else {
+      branches.forEach((branch, index) => {
+        message += `${index + 1}. 📍 ${branch.address}`;
+        if (branch.isMain) message += ' <b>(Главный)</b>';
+        message += '\n';
+      });
+    }
+    
+    message += '\n<i>Для управления филиалами обратитесь к менеджеру</i>';
+    
+    return ctx.reply(message, { parse_mode: 'HTML' });
+  }
+  
+  if (text === '👤 Профиль' && ctx.user && ctx.user.role === 'restaurant') {
+    return registrationHandlers.profileCommand(ctx);
   }
   
   // Не показываем меню по умолчанию для необработанных сообщений

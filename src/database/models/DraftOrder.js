@@ -15,7 +15,7 @@ module.exports = (sequelize) => {
       },
       allowNull: false
     },
-    branchId: {
+    branch_id: {
       type: DataTypes.INTEGER,
       references: {
         model: 'restaurant_branches',
@@ -50,7 +50,7 @@ module.exports = (sequelize) => {
     underscored: true,
     indexes: [
       {
-        fields: ['restaurant_id', 'branchId', 'scheduled_for', 'status'],
+        fields: ['restaurant_id', 'branch_id', 'scheduled_for', 'status'],
         unique: true,
         where: {
           status: 'draft'
@@ -63,7 +63,7 @@ module.exports = (sequelize) => {
         fields: ['restaurant_id', 'status']
       },
       {
-        fields: ['branchId']
+        fields: ['branch_id']
       }
     ]
   });

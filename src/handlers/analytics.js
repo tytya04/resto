@@ -8,6 +8,16 @@ const moment = require('moment');
 // История цен продукта
 const priceHistory = async (ctx) => {
   try {
+    // Отвечаем на callback query если это callback
+    if (ctx.callbackQuery) {
+      await ctx.answerCbQuery();
+    }
+    
+    // Если вызывается через callback, показываем общую историю цен
+    if (ctx.callbackQuery) {
+      return showGeneralPriceHistory(ctx);
+    }
+    
     const args = ctx.message.text.split(' ').slice(1).join(' ');
     
     if (!args) {
@@ -92,9 +102,15 @@ const priceHistory = async (ctx) => {
 // Отчет по рентабельности
 const profitabilityReport = async (ctx) => {
   try {
+    // Отвечаем на callback query если это callback
+    if (ctx.callbackQuery) {
+      await ctx.answerCbQuery();
+    }
+    
     await ctx.reply('⏳ Формирую отчет по рентабельности...');
     
-    const restaurantId = ctx.user.restaurant_id;
+    // Для закупщика показываем общую рентабельность по всем ресторанам
+    const restaurantId = ctx.user.role === 'buyer' ? null : ctx.user.restaurant_id;
     const report = await AnalyticsService.getProfitabilityReport(restaurantId);
     
     if (report.length === 0) {
@@ -199,6 +215,16 @@ const confirmUpdatePrices = async (ctx) => {
 // Анализ конкретного заказа
 const orderCostAnalysis = async (ctx) => {
   try {
+    // Отвечаем на callback query если это callback
+    if (ctx.callbackQuery) {
+      await ctx.answerCbQuery();
+    }
+    
+    // Если вызывается через callback, показываем общий анализ заказов
+    if (ctx.callbackQuery) {
+      return showGeneralOrderAnalysis(ctx);
+    }
+    
     const args = ctx.message.text.split(' ').slice(1);
     
     if (!args[0]) {
@@ -318,6 +344,96 @@ const handleTextCommands = async (ctx) => {
       return updatePrices(ctx);
     default:
       return false;
+  }
+};
+
+// Показать общий анализ заказов (для callback)
+const showGeneralOrderAnalysis = async (ctx) => {
+  try {
+    const { OrderItem } = require('../database/models');
+    const { Op } = require('sequelize');
+    
+    // Получаем статистику заказов за последние 30 дней
+    const thirtyDaysAgo = moment().subtract(30, 'days').toDate();
+    
+    const orders = await Order.findAll({
+      where: {
+        sent_at: {
+          [Op.gte]: thirtyDaysAgo
+        }
+      },
+      include: [{
+        model: OrderItem,
+        as: 'orderItems'
+      }],
+      order: [['sent_at', 'DESC']],
+      limit: 10
+    });
+
+    if (orders.length === 0) {
+      return ctx.reply('📊 Нет заказов за последние 30 дней');
+    }
+
+    let message = '📊 <b>Анализ заказов за 30 дней</b>\n\n';
+    
+    let totalOrders = orders.length;
+    let totalAmount = orders.reduce((sum, order) => sum + (parseFloat(order.total_amount) || 0), 0);
+    let totalItems = orders.reduce((sum, order) => sum + order.orderItems.length, 0);
+    
+    message += `📈 <b>Общая статистика:</b>\n`;
+    message += `📦 Всего заказов: ${totalOrders}\n`;
+    message += `💰 Общая сумма: ${totalAmount.toFixed(2)} ₽\n`;
+    message += `📋 Всего позиций: ${totalItems}\n`;
+    message += `💵 Средний чек: ${(totalAmount / totalOrders).toFixed(2)} ₽\n\n`;
+
+    message += `📋 <b>Последние заказы:</b>\n`;
+    orders.slice(0, 5).forEach(order => {
+      const date = moment(order.sent_at).format('DD.MM HH:mm');
+      message += `• #${order.order_number} (${date}) - ${order.total_amount || 0} ₽\n`;
+    });
+
+    message += '\n💡 Для анализа конкретного заказа используйте:\n/order_analysis [номер заказа]';
+
+    return ctx.reply(message, { parse_mode: 'HTML' });
+  } catch (error) {
+    logger.error('Error in showGeneralOrderAnalysis:', error);
+    return ctx.reply('❌ Произошла ошибка при анализе заказов');
+  }
+};
+
+// Показать общую историю цен (для callback)
+const showGeneralPriceHistory = async (ctx) => {
+  try {
+    // Получаем последние изменения цен за 30 дней
+    const recentChanges = await PriceHistory.findAll({
+      where: {
+        created_at: {
+          [require('sequelize').Op.gte]: moment().subtract(30, 'days').toDate()
+        }
+      },
+      order: [['created_at', 'DESC']],
+      limit: 20
+    });
+
+    if (recentChanges.length === 0) {
+      return ctx.reply('📊 Нет изменений цен за последние 30 дней');
+    }
+
+    let message = '📊 <b>История изменений цен за 30 дней</b>\n\n';
+    
+    recentChanges.forEach(change => {
+      const date = moment(change.created_at).format('DD.MM.YYYY');
+      message += `📅 ${date}\n`;
+      message += `📦 ${change.product_name}\n`;
+      message += `💰 ${change.old_price || 'н/д'} → ${change.new_price} ₽\n\n`;
+    });
+
+    message += '\n💡 Для детальной истории конкретного продукта используйте:\n/price_history [название продукта]';
+
+    return ctx.reply(message, { parse_mode: 'HTML' });
+  } catch (error) {
+    logger.error('Error in showGeneralPriceHistory:', error);
+    return ctx.reply('❌ Произошла ошибка при получении истории цен');
   }
 };
 
