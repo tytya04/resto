@@ -354,6 +354,56 @@ class DraftOrderService {
         const matchedProduct = await productMatcher.findExactMatch(parsed.name);
         
         if (matchedProduct) {
+          // Проверяем, есть ли альтернативные варианты этого продукта
+          const suggestions = await productMatcher.suggestProducts(parsed.name, 10);
+          const alternativeVariants = suggestions.filter(s => 
+            s.id !== matchedProduct.id && 
+            s.product_name.toLowerCase().includes(parsed.name.toLowerCase()) &&
+            (s.product_name.includes('стандарт') || s.product_name.includes('отбор') || 
+             s.product_name.includes('премиум') || s.product_name.includes('эконом'))
+          );
+          
+          // Если найдены альтернативные варианты качества, предлагаем выбор
+          if (alternativeVariants.length > 0) {
+            logger.info('Found alternative variants:', {
+              query: parsed.name,
+              exactMatch: matchedProduct.product_name,
+              alternatives: alternativeVariants.map(a => a.product_name)
+            });
+            
+            // Добавляем основной продукт в начало списка предложений
+            const allVariants = [
+              { 
+                id: matchedProduct.id,
+                product_name: matchedProduct.product_name,
+                category: matchedProduct.category,
+                unit: matchedProduct.unit,
+                last_purchase_price: matchedProduct.last_purchase_price,
+                score: 0, 
+                match_type: 'exact', 
+                matched_term: matchedProduct.product_name 
+              },
+              ...alternativeVariants
+            ];
+            
+            const item = await DraftOrderItem.create({
+              draft_order_id: draftOrderId,
+              product_name: parsed.name,
+              original_name: parsed.name,
+              quantity: parsed.quantity,
+              unit: parsed.unit,
+              status: 'unmatched',
+              matched_product_id: null,
+              added_by: userId
+            });
+
+            results.unmatched.push({
+              item,
+              suggestions: allVariants
+            });
+            continue;
+          }
+          
           // Проверяем, есть ли уже такой продукт в черновике
           const existingItem = await DraftOrderItem.findOne({
             where: {
