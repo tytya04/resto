@@ -487,6 +487,7 @@ const handleProductText = async (ctx) => {
     // Показываем нераспознанные с предложениями
     if (results.unmatched.length > 0) {
       message += '❓ <b>Требуется уточнение:</b>\n';
+      message += '<i>Эти продукты не найдены в каталоге. Выберите существующий продукт из списка или удалите позицию.</i>\n';
       
       for (const { item, suggestions } of results.unmatched) {
         message += `\n"${item.original_name}" - ${item.quantity} ${item.unit}\n`;
@@ -509,8 +510,13 @@ const handleProductText = async (ctx) => {
           ]);
           
           await ctx.reply(
-            `❓ Выберите правильный вариант для "${item.original_name}":`,
-            keyboard
+            `❓ <b>Продукт "${item.original_name}" не найден в каталоге</b>\n\n` +
+            `⚠️ <i>Новые продукты может добавлять только менеджер.</i>\n\n` +
+            `Выберите подходящий вариант из существующих:`,
+            { 
+              parse_mode: 'HTML',
+              ...keyboard 
+            }
           );
         } else {
           const keyboard = {
@@ -523,8 +529,13 @@ const handleProductText = async (ctx) => {
           };
           
           await ctx.reply(
-            `❌ Не найдено похожих продуктов для "${item.original_name}"`,
-            keyboard
+            `❌ <b>Продукт "${item.original_name}" не найден</b>\n\n` +
+            `⚠️ <i>В каталоге нет похожих продуктов. Новые продукты может добавлять только менеджер.</i>\n\n` +
+            `Вы можете поискать другой продукт или удалить эту позицию:`,
+            { 
+              parse_mode: 'HTML',
+              ...keyboard 
+            }
           );
         }
       }
@@ -656,6 +667,7 @@ const viewDraft = async (ctx) => {
     
     if (unmatched.length > 0) {
       message += '❓ <b>Требуют уточнения:</b>\n';
+      message += '<i>Эти продукты не найдены в каталоге и НЕ будут отправлены в заказе</i>\n';
       unmatched.forEach((item, index) => {
         message += `${index + 1}. ${item.original_name} - ${item.quantity} ${item.unit}\n`;
       });
@@ -676,6 +688,10 @@ const viewDraft = async (ctx) => {
     if (confirmed.length > 0 && unmatched.length === 0) {
       keyboard.reply_markup.inline_keyboard.push([
         { text: '📤 Отправить заказ', callback_data: 'draft_send' }
+      ]);
+    } else if (confirmed.length > 0 && unmatched.length > 0) {
+      keyboard.reply_markup.inline_keyboard.push([
+        { text: '⚠️ Отправить только подтвержденные', callback_data: 'draft_send' }
       ]);
     }
     
