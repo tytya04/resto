@@ -1,5 +1,5 @@
 const { Markup } = require('telegraf');
-const { Order, OrderItem, Restaurant, User, sequelize } = require('../database/models');
+const { Order, OrderItem, Restaurant, User, sequelize, NomenclatureCache } = require('../database/models');
 const logger = require('../utils/logger');
 const { Op } = require('sequelize');
 const { formatInTimezone } = require('../utils/timezone');
@@ -7,13 +7,17 @@ const { formatInTimezone } = require('../utils/timezone');
 // Показать общий список продуктов для закупки
 const showConsolidatedProducts = async (ctx) => {
   try {
-    // Получаем все позиции из заказов со статусом sent
+    // Получаем все позиции из заказов со статусом sent и processing
     const items = await OrderItem.findAll({
       include: [{
         model: Order,
         as: 'order',
-        where: { status: 'sent' },
-        attributes: ['id', 'order_number', 'restaurant_id']
+        where: { 
+          status: {
+            [Op.in]: ['sent', 'processing']
+          }
+        },
+        attributes: ['id', 'order_number', 'restaurant_id', 'status']
       }],
       order: [['product_name', 'ASC']]
     });
@@ -46,16 +50,31 @@ const showConsolidatedProducts = async (ctx) => {
     let message = '📋 <b>Общий список продуктов для закупки</b>\n\n';
     
     let index = 1;
-    Object.values(consolidated).forEach(product => {
-      const emoji = product.is_purchased ? '✅' : '📦';
-      message += `${emoji} ${index}. <b>${product.product_name}</b>\n`;
-      message += `   Количество: ${product.total_quantity} ${product.unit}\n`;
-      if (product.purchased_quantity > 0) {
-        message += `   Закуплено: ${product.purchased_quantity} ${product.unit}\n`;
+    for (const product of Object.values(consolidated)) {
+      // Проверяем наличие технической пометки для первого продукта
+      if (product.items.length > 0) {
+        const firstItem = product.items[0];
+        const nomenclature = await NomenclatureCache.findOne({
+          where: { product_name: product.product_name },
+          attributes: ['technical_note']
+        });
+        
+        const emoji = product.is_purchased ? '✅' : '📦';
+        message += `${emoji} ${index}. <b>${product.product_name}</b>`;
+        
+        if (nomenclature?.technical_note) {
+          message += ` <i>(${nomenclature.technical_note})</i>`;
+        }
+        
+        message += '\n';
+        message += `   Количество: ${product.total_quantity} ${product.unit}\n`;
+        if (product.purchased_quantity > 0) {
+          message += `   Закуплено: ${product.purchased_quantity} ${product.unit}\n`;
+        }
+        message += '\n';
       }
-      message += '\n';
       index++;
-    });
+    }
 
     const keyboard = {
       reply_markup: {
@@ -82,6 +101,42 @@ const startPurchase = async (ctx) => {
     const consolidated = ctx.session.consolidatedProducts;
     if (!consolidated) {
       return ctx.reply('❌ Сессия истекла. Начните заново.');
+    }
+
+    // Обновляем статус заказов на 'processing' при начале закупки
+    const orderIds = new Set();
+    Object.values(consolidated).forEach(product => {
+      product.items.forEach(item => {
+        if (item.order && item.order.id) {
+          orderIds.add(item.order.id);
+        }
+      });
+    });
+
+    // Обновляем статус заказов
+    if (orderIds.size > 0) {
+      const t = await sequelize.transaction();
+      try {
+        await Order.update(
+          { 
+            status: 'processing',
+            processed_at: new Date(),
+            processed_by: ctx.from.id
+          },
+          { 
+            where: { 
+              id: Array.from(orderIds),
+              status: 'sent' // Обновляем только заказы со статусом 'sent'
+            },
+            transaction: t
+          }
+        );
+        await t.commit();
+        logger.info(`Updated ${orderIds.size} orders to processing status by buyer ${ctx.from.id}`);
+      } catch (error) {
+        await t.rollback();
+        logger.error('Error updating order status to processing:', error);
+      }
     }
 
     // Находим первый незакупленный продукт
@@ -118,10 +173,21 @@ const startPurchase = async (ctx) => {
 
 // Показать продукт для закупки
 const showPurchaseProduct = async (ctx, product) => {
-  const message = `🛒 <b>Закупка продукта</b>\n\n` +
-    `📦 <b>${product.product_name}</b>\n` +
-    `📏 Необходимо: ${product.total_quantity} ${product.unit}\n\n` +
-    `Введите закупленное количество:`;
+  // Проверяем техническую пометку
+  const nomenclature = await NomenclatureCache.findOne({
+    where: { product_name: product.product_name },
+    attributes: ['technical_note']
+  });
+  
+  let message = `🛒 <b>Закупка продукта</b>\n\n`;
+  message += `📦 <b>${product.product_name}</b>`;
+  
+  if (nomenclature?.technical_note) {
+    message += ` <i>(${nomenclature.technical_note})</i>`;
+  }
+  
+  message += `\n📏 Необходимо: ${product.total_quantity} ${product.unit}\n\n`;
+  message += `Введите закупленное количество:`;
 
   const keyboard = {
     reply_markup: {
@@ -224,7 +290,11 @@ const nextProduct = async (ctx) => {
 const showOrdersByRestaurant = async (ctx) => {
   try {
     const orders = await Order.findAll({
-      where: { status: 'sent' },
+      where: { 
+        status: {
+          [Op.in]: ['sent', 'processing']
+        }
+      },
       include: [
         {
           model: Restaurant,
@@ -287,9 +357,13 @@ const startPacking = async (ctx) => {
   try {
     await ctx.answerCbQuery();
 
-    // Получаем все заказы для комплектации
+    // Получаем все заказы для комплектации (включая processing)
     const orders = await Order.findAll({
-      where: { status: 'sent' },
+      where: { 
+        status: {
+          [Op.in]: ['sent', 'processing']
+        }
+      },
       include: [
         {
           model: Restaurant,
@@ -305,6 +379,33 @@ const startPacking = async (ctx) => {
 
     if (orders.length === 0) {
       return ctx.reply('📋 Нет заказов для комплектации');
+    }
+
+    // Обновляем статус заказов на 'processing' если они еще не в этом статусе
+    const ordersToUpdate = orders.filter(o => o.status === 'sent').map(o => o.id);
+    
+    if (ordersToUpdate.length > 0) {
+      const t = await sequelize.transaction();
+      try {
+        await Order.update(
+          { 
+            status: 'processing',
+            processed_at: new Date(),
+            processed_by: ctx.from.id
+          },
+          { 
+            where: { 
+              id: ordersToUpdate
+            },
+            transaction: t
+          }
+        );
+        await t.commit();
+        logger.info(`Updated ${ordersToUpdate.length} orders to processing status for packing by buyer ${ctx.from.id}`);
+      } catch (error) {
+        await t.rollback();
+        logger.error('Error updating order status to processing:', error);
+      }
     }
 
     // Сохраняем в сессии
@@ -335,9 +436,35 @@ const showPackingOrder = async (ctx) => {
   const order = ctx.session.packingOrders[ctx.session.currentOrderIndex];
   
   if (!order) {
+    // Все заказы укомплектованы, помечаем их как завершенные
+    const completedOrders = ctx.session.packingOrders || [];
+    if (completedOrders.length > 0) {
+      const t = await sequelize.transaction();
+      try {
+        await Order.update(
+          { 
+            status: 'completed',
+            completed_at: new Date()
+          },
+          { 
+            where: { 
+              id: completedOrders.map(o => o.id),
+              status: 'processing' // Обновляем только заказы со статусом 'processing'
+            },
+            transaction: t
+          }
+        );
+        await t.commit();
+        logger.info(`Marked ${completedOrders.length} orders as completed by buyer ${ctx.from.id}`);
+      } catch (error) {
+        await t.rollback();
+        logger.error('Error updating order status to completed:', error);
+      }
+    }
+
     return ctx.editMessageText(
       '✅ <b>Комплектация завершена!</b>\n\n' +
-      'Все заказы укомплектованы.',
+      'Все заказы укомплектованы и помечены как выполненные.',
       {
         parse_mode: 'HTML',
         reply_markup: {
@@ -359,12 +486,23 @@ const showPackingOrder = async (ctx) => {
 
   ctx.session.currentItemId = unpackedItem.id;
 
-  const message = `📊 <b>Комплектация корзины</b>\n\n` +
-    `🏢 ${order.restaurant_name}\n` +
-    `📋 Заказ #${order.order_number}\n\n` +
-    `📦 <b>${unpackedItem.product_name}</b>\n` +
-    `📏 Заказано: ${unpackedItem.quantity} ${unpackedItem.unit}\n\n` +
-    `Введите фактическое количество:`;
+  // Проверяем техническую пометку
+  const nomenclature = await NomenclatureCache.findOne({
+    where: { product_name: unpackedItem.product_name },
+    attributes: ['technical_note']
+  });
+
+  let message = `📊 <b>Комплектация корзины</b>\n\n`;
+  message += `🏢 ${order.restaurant_name}\n`;
+  message += `📋 Заказ #${order.order_number}\n\n`;
+  message += `📦 <b>${unpackedItem.product_name}</b>`;
+  
+  if (nomenclature?.technical_note) {
+    message += ` <i>(${nomenclature.technical_note})</i>`;
+  }
+  
+  message += `\n📏 Заказано: ${unpackedItem.quantity} ${unpackedItem.unit}\n\n`;
+  message += `Введите фактическое количество:`;
 
   const keyboard = {
     reply_markup: {
@@ -466,6 +604,122 @@ const nextPackItem = async (ctx) => {
   }
 };
 
+// Показать завершенные заказы
+const showCompletedOrders = async (ctx) => {
+  try {
+    // Получаем завершенные заказы за последние 7 дней
+    const weekAgo = new Date();
+    weekAgo.setDate(weekAgo.getDate() - 7);
+
+    const orders = await Order.findAll({
+      where: { 
+        status: 'completed',
+        completed_at: {
+          [Op.gte]: weekAgo
+        }
+      },
+      include: [
+        {
+          model: Restaurant,
+          as: 'restaurant'
+        }
+      ],
+      order: [['completed_at', 'DESC']],
+      limit: 50
+    });
+
+    if (orders.length === 0) {
+      return ctx.reply('📋 Нет завершенных заказов за последнюю неделю');
+    }
+
+    let message = '✅ <b>Завершенные заказы (последние 7 дней)</b>\n\n';
+
+    orders.forEach(order => {
+      message += `📋 #${order.order_number}\n`;
+      message += `🏢 ${order.restaurant.name}\n`;
+      message += `📅 Завершен: ${formatInTimezone(order.completed_at, 'DD.MM HH:mm')}\n\n`;
+    });
+
+    await ctx.reply(message, { 
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🔙 Назад', callback_data: 'menu_back' }]
+        ]
+      }
+    });
+  } catch (error) {
+    logger.error('Error in showCompletedOrders:', error);
+    ctx.reply('❌ Произошла ошибка при загрузке завершенных заказов');
+  }
+};
+
+// Показать статистику
+const showStatistics = async (ctx) => {
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    const weekAgo = new Date();
+    weekAgo.setDate(weekAgo.getDate() - 7);
+    weekAgo.setHours(0, 0, 0, 0);
+
+    // Получаем статистику
+    const stats = await Order.findAll({
+      attributes: [
+        'status',
+        [sequelize.fn('COUNT', sequelize.col('id')), 'count']
+      ],
+      where: {
+        created_at: {
+          [Op.gte]: weekAgo
+        }
+      },
+      group: ['status']
+    });
+
+    const completedToday = await Order.count({
+      where: {
+        status: 'completed',
+        completed_at: {
+          [Op.gte]: today
+        }
+      }
+    });
+
+    let message = '📈 <b>Статистика за последние 7 дней</b>\n\n';
+    
+    const statusMap = {
+      'sent': '📤 Отправлено',
+      'processing': '⏳ В обработке',
+      'completed': '✅ Завершено',
+      'rejected': '❌ Отклонено'
+    };
+
+    let total = 0;
+    stats.forEach(stat => {
+      const status = statusMap[stat.status] || stat.status;
+      message += `${status}: ${stat.get('count')}\n`;
+      total += parseInt(stat.get('count'));
+    });
+
+    message += `\n📊 Всего заказов: ${total}\n`;
+    message += `✅ Завершено сегодня: ${completedToday}\n`;
+
+    await ctx.reply(message, { 
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🔙 Назад', callback_data: 'menu_back' }]
+        ]
+      }
+    });
+  } catch (error) {
+    logger.error('Error in showStatistics:', error);
+    ctx.reply('❌ Произошла ошибка при загрузке статистики');
+  }
+};
+
 module.exports = {
   showConsolidatedProducts,
   showOrdersByRestaurant,
@@ -474,6 +728,8 @@ module.exports = {
   handleTextCommands,
   nextProduct,
   nextPackItem,
+  showCompletedOrders,
+  showStatistics,
   handleCallbacks: async (ctx) => {
     const action = ctx.callbackQuery.data;
     

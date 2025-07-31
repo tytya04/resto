@@ -609,7 +609,9 @@ const processedOrders = async (ctx) => {
     
     const orders = await Order.findAll({
       where: {
-        status: ['approved', 'completed', 'rejected']
+        status: {
+          [Op.in]: ['processing', 'completed', 'rejected']
+        }
       },
       include: [{
         model: Restaurant,
@@ -626,14 +628,21 @@ const processedOrders = async (ctx) => {
     } else {
       orders.forEach((order, index) => {
         const statusEmoji = {
-          'approved': '✅',
-          'completed': '📦',
+          'processing': '⏳',
+          'completed': '✅',
           'rejected': '❌'
         };
         
-        message += `${index + 1}. ${statusEmoji[order.status]} Заказ #${order.id}\n`;
+        const statusText = {
+          'processing': 'В обработке',
+          'completed': 'Завершен',
+          'rejected': 'Отклонен'
+        };
+        
+        message += `${index + 1}. ${statusEmoji[order.status]} Заказ #${order.order_number}\n`;
         message += `🏢 ${order.restaurant.name}\n`;
-        message += `📅 ${new Date(order.created_at).toLocaleDateString('ru-RU')}\n`;
+        message += `📅 ${formatInTimezone(order.created_at, 'DD.MM HH:mm')}\n`;
+        message += `📌 Статус: ${statusText[order.status]}\n`;
         message += `💰 ${order.total_amount || 0} руб.\n\n`;
       });
     }

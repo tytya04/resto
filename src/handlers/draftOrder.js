@@ -567,8 +567,24 @@ const handleProductText = async (ctx) => {
 
     return true;
   } catch (error) {
-    logger.error('Error handling product text:', error);
-    ctx.reply('❌ Произошла ошибка при обработке продуктов');
+    logger.error('Error handling product text:', {
+      error: error.message,
+      stack: error.stack,
+      text: ctx.message.text,
+      userId: ctx.user?.id,
+      draftOrderId: ctx.session?.draftOrderId
+    });
+    
+    // Проверяем тип ошибки и даем более информативное сообщение
+    let errorMessage = '❌ Произошла ошибка при обработке продуктов';
+    
+    if (error.message.includes('database')) {
+      errorMessage = '⚠️ База данных временно недоступна. Попробуйте еще раз через несколько секунд.';
+    } else if (error.message.includes('parseAndAddProducts')) {
+      errorMessage = '❌ Ошибка при распознавании продуктов. Проверьте формат ввода.';
+    }
+    
+    await ctx.reply(errorMessage);
     return true;
   }
 };

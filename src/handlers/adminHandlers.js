@@ -1567,16 +1567,17 @@ const handleAdminCallbacks = async (ctx) => {
             `📅 Время: ${new Date().toLocaleString('ru-RU')}`;
           
           // Получаем всех админов и менеджеров кроме текущего пользователя
+          const { Op } = require('sequelize');
           const otherAdminsAndManagers = await User.findAll({
             where: {
-              role: ['admin', 'manager'],
+              role: { [Op.in]: ['admin', 'manager'] },
               is_active: true,
-              id: { [require('sequelize').Op.ne]: ctx.user.id }
+              id: { [Op.ne]: ctx.user.id }
             }
           });
           
           // Отправляем уведомления
-          const notificationService = require('../services/NotificationService');
+          const { notificationService } = require('../services/NotificationService');
           await Promise.all(
             otherAdminsAndManagers.map(user => 
               notificationService.sendToTelegramId(user.telegram_id, syncMessage, {
@@ -1717,16 +1718,17 @@ const handleAdminCallbacks = async (ctx) => {
             `📅 Время: ${new Date().toLocaleString('ru-RU')}`;
           
           // Получаем всех админов и менеджеров кроме текущего пользователя
+          const { Op } = require('sequelize');
           const otherAdminsAndManagers = await User.findAll({
             where: {
-              role: ['admin', 'manager'],
+              role: { [Op.in]: ['admin', 'manager'] },
               is_active: true,
-              id: { [require('sequelize').Op.ne]: ctx.user.id }
+              id: { [Op.ne]: ctx.user.id }
             }
           });
           
           // Отправляем уведомления
-          const notificationService = require('../services/NotificationService');
+          const { notificationService } = require('../services/NotificationService');
           await Promise.all(
             otherAdminsAndManagers.map(user => 
               notificationService.sendToTelegramId(user.telegram_id, syncMessage, {

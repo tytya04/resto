@@ -80,7 +80,7 @@ async function showOrderItem(ctx) {
     return await showOrderSummary(ctx);
   }
   
-  // Ищем цену в номенклатуре
+  // Ищем цену и техническую пометку в номенклатуре
   const nomenclature = await NomenclatureCache.findOne({
     where: { product_name: item.product_name }
   });
@@ -89,7 +89,14 @@ async function showOrderItem(ctx) {
   const currentPrice = editedItems[currentItemIndex]?.price || item.price || suggestedPrice;
   
   let message = `📦 <b>Позиция ${currentItemIndex + 1} из ${order.orderItems.length}</b>\n\n`;
-  message += `<b>${item.product_name}</b>\n`;
+  message += `<b>${item.product_name}</b>`;
+  
+  // Добавляем техническую пометку если есть
+  if (nomenclature?.technical_note) {
+    message += ` <i>(${nomenclature.technical_note})</i>`;
+  }
+  
+  message += `\n`;
   message += `Количество: ${item.quantity} ${item.unit}\n`;
   
   if (suggestedPrice) {

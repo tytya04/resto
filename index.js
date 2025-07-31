@@ -233,6 +233,43 @@ bot.command('checkuser', async (ctx) => {
   }
 });
 
+// Команда для тестирования уведомлений о регистрации
+bot.command('testnotify', requireRole(['admin', 'manager']), async (ctx) => {
+  try {
+    const { notificationService } = require('./src/services/NotificationService');
+    const { User } = require('./src/database/models');
+    const { Op } = require('sequelize');
+    
+    // Получаем всех админов и менеджеров кроме текущего пользователя
+    const otherAdminsAndManagers = await User.findAll({
+      where: {
+        role: { [Op.in]: ['admin', 'manager'] },
+        is_active: true,
+        id: { [Op.ne]: ctx.user.id }
+      }
+    });
+    
+    const testMessage = 
+      `🧪 <b>Тестовое уведомление</b>\n\n` +
+      `Это тестовое сообщение для проверки синхронизации.\n` +
+      `Отправил: ${ctx.user.first_name || ctx.user.username}\n` +
+      `Время: ${new Date().toLocaleString('ru-RU')}`;
+    
+    await Promise.all(
+      otherAdminsAndManagers.map(user => 
+        notificationService.sendToTelegramId(user.telegram_id, testMessage, {
+          parse_mode: 'HTML'
+        })
+      )
+    );
+    
+    return ctx.reply(`✅ Тестовые уведомления отправлены ${otherAdminsAndManagers.length} пользователям`);
+  } catch (error) {
+    logger.error('Error in testnotify:', error);
+    return ctx.reply(`❌ Ошибка: ${error.message}`);
+  }
+});
+
 // Команда отмены для выхода из любой сцены
 bot.command('cancel', async (ctx) => {
   if (ctx.scene && ctx.scene.current) {
@@ -1252,7 +1289,7 @@ bot.on('text', async (ctx) => {
   // Проверяем неправильные команды для ресторана
   if (ctx.user && ctx.user.role === 'restaurant') {
     const managerCommands = ['📋 Заявки', '📋 Меню менеджера', '👥 Управление пользователями', '📊 Статистика'];
-    if (managerCommands.includes(text)) {
+    if (managerCommands.includes(ctx.message.text)) {
       await ctx.reply(
         '❌ Эта команда недоступна для ресторана.\n\n' +
         '✅ Вот ваше правильное меню:',
@@ -1273,8 +1310,7 @@ bot.on('text', async (ctx) => {
   
   // Проверяем команды email настроек
   if (ctx.user && ctx.user.role === 'manager') {
-    const text = ctx.message.text;
-    if (text === '📧 Email настройки') {
+    if (ctx.message.text === '📧 Email настройки') {
       return emailSettings.emailSettingsMenu(ctx);
     }
     const handled = await emailSettings.handleTextCommands(ctx);
