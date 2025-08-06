@@ -38,8 +38,9 @@ processOrderScene.enter(async (ctx) => {
     // Для continue_process разрешаем обработку заказов в статусе processing
     const isProcessing = order.status === 'processing' && order.processed_by === ctx.user.id;
     const isSent = order.status === 'sent';
+    const isPurchased = order.status === 'purchased'; // Добавляем проверку для заказов после закупки
     
-    if (!isSent && !isProcessing) {
+    if (!isSent && !isProcessing && !isPurchased) {
       await ctx.reply('⚠️ Этот заказ уже завершен или обрабатывается другим менеджером');
       return ctx.scene.leave();
     }
@@ -51,7 +52,7 @@ processOrderScene.enter(async (ctx) => {
     }
     
     // Обновляем статус на "в обработке" только если заказ еще не обрабатывается
-    if (order.status === 'sent') {
+    if (order.status === 'sent' || order.status === 'purchased') {
       await OrderService.updateOrderStatus(orderId, 'processing', ctx.user.id);
     }
     
@@ -85,8 +86,9 @@ async function showOrderItem(ctx) {
     where: { product_name: item.product_name }
   });
   
-  const suggestedPrice = nomenclature ? nomenclature.price : null;
-  const currentPrice = editedItems[currentItemIndex]?.price || item.price || suggestedPrice;
+  // Используем last_sale_price как предложенную цену для продажи
+  const suggestedPrice = nomenclature ? nomenclature.last_sale_price : null;
+  const currentPrice = editedItems[currentItemIndex]?.price || item.price;
   
   let message = `📦 <b>Позиция ${currentItemIndex + 1} из ${order.orderItems.length}</b>\n\n`;
   message += `<b>${item.product_name}</b>`;
@@ -104,26 +106,36 @@ async function showOrderItem(ctx) {
   }
   
   if (currentPrice) {
-    message += `💵 Текущая цена: ${currentPrice} ₽\n`;
+    message += `💵 Цена продажи: ${currentPrice} ₽\n`;
     message += `📊 Сумма: ${(currentPrice * item.quantity).toFixed(2)} ₽\n`;
   } else {
     message += `⚠️ Цена не указана\n`;
   }
   
-  const keyboard = Markup.inlineKeyboard([
+  const buttons = [
     [Markup.button.callback('💰 Изменить цену', 'change_price')],
-    suggestedPrice && currentPrice !== suggestedPrice ? 
-      [Markup.button.callback(`✅ Применить ${suggestedPrice} ₽`, 'apply_suggested')] : [],
     [
       Markup.button.callback('⬅️ Назад', 'prev_item'),
       Markup.button.callback('➡️ Далее', 'next_item')
     ],
     [Markup.button.callback('📋 К итогу', 'show_summary')]
-  ].filter(row => row.length > 0));
+  ];
+  
+  const keyboard = Markup.inlineKeyboard(buttons);
+  
+  // Логируем для отладки
+  logger.info('Showing order item:', {
+    itemIndex: currentItemIndex,
+    productName: item.product_name,
+    currentPrice,
+    suggestedPrice,
+    hasKeyboard: !!keyboard,
+    buttonsCount: buttons.length
+  });
   
   await ctx.reply(message, { 
     parse_mode: 'HTML',
-    reply_markup: keyboard 
+    reply_markup: keyboard.reply_markup
   });
 }
 
@@ -134,37 +146,18 @@ processOrderScene.action('change_price', async (ctx) => {
   await ctx.reply(
     '💰 Введите новую цену за единицу товара:\n\n' +
     'Например: 150.50 или 200',
-    Markup.inlineKeyboard([
-      [Markup.button.callback('❌ Отмена', 'cancel_price_change')]
-    ])
+    {
+      reply_markup: Markup.inlineKeyboard([
+        [Markup.button.callback('❌ Отмена', 'cancel_price_change')]
+      ]).reply_markup
+    }
   );
   
   ctx.scene.session.awaitingPrice = true;
 });
 
-// Обработчик применения предложенной цены
-processOrderScene.action('apply_suggested', async (ctx) => {
-  await ctx.answerCbQuery();
-  
-  const { order, currentItemIndex } = ctx.scene.session;
-  const item = order.orderItems[currentItemIndex];
-  
-  const nomenclature = await NomenclatureCache.findOne({
-    where: { product_name: item.product_name }
-  });
-  
-  if (nomenclature && nomenclature.price) {
-    // Сохраняем изменение
-    if (!ctx.scene.session.editedItems[currentItemIndex]) {
-      ctx.scene.session.editedItems[currentItemIndex] = { ...item.dataValues };
-    }
-    ctx.scene.session.editedItems[currentItemIndex].price = nomenclature.price;
-    ctx.scene.session.editedItems[currentItemIndex].total = nomenclature.price * item.quantity;
-    
-    await ctx.editMessageText('✅ Цена применена');
-    await showOrderItem(ctx);
-  }
-});
+// Обработчик применения предложенной цены - удален, так как не используется
+// (цена из номенклатуры - это себестоимость, а не отпускная цена)
 
 // Навигация между позициями
 processOrderScene.action('prev_item', async (ctx) => {
@@ -250,7 +243,7 @@ async function showOrderSummary(ctx) {
   
   await ctx.editMessageText(message, { 
     parse_mode: 'HTML',
-    reply_markup: Markup.inlineKeyboard(keyboard)
+    reply_markup: Markup.inlineKeyboard(keyboard).reply_markup
   });
 }
 
@@ -316,9 +309,11 @@ processOrderScene.action('add_comment', async (ctx) => {
     `💬 Текущий комментарий:\n${currentComment}\n\nВведите новый комментарий:` :
     '💬 Введите комментарий к заказу:';
   
-  await ctx.reply(message, Markup.inlineKeyboard([
-    [Markup.button.callback('❌ Отмена', 'cancel_comment')]
-  ]));
+  await ctx.reply(message, {
+    reply_markup: Markup.inlineKeyboard([
+      [Markup.button.callback('❌ Отмена', 'cancel_comment')]
+    ]).reply_markup
+  });
   
   ctx.scene.session.awaitingComment = true;
 });
@@ -359,7 +354,7 @@ processOrderScene.action('approve_order', async (ctx) => {
     }
     
     // Отправляем уведомление ресторану
-    await notificationService.sendNotification(
+    await notificationService.sendToTelegramId(
       order.user.telegram_id,
       `✅ <b>Ваш заказ #${order.order_number} подтвержден!</b>\n\n` +
       `💰 Сумма: ${order.total_amount} ₽\n` +
@@ -378,7 +373,7 @@ processOrderScene.action('approve_order', async (ctx) => {
       `Хотите сгенерировать документы?`,
       { 
         parse_mode: 'HTML',
-        reply_markup: keyboard
+        reply_markup: keyboard.reply_markup
       }
     );
     
@@ -396,12 +391,14 @@ processOrderScene.action('reject_order', async (ctx) => {
   
   await ctx.reply(
     '❌ Укажите причину отклонения заказа:',
-    Markup.inlineKeyboard([
-      [Markup.button.callback('Нет в наличии', 'reject_no_stock')],
-      [Markup.button.callback('Неверная позиция', 'reject_wrong_item')],
-      [Markup.button.callback('Другая причина', 'reject_other')],
-      [Markup.button.callback('❌ Отмена', 'cancel_rejection')]
-    ])
+    {
+      reply_markup: Markup.inlineKeyboard([
+        [Markup.button.callback('Нет в наличии', 'reject_no_stock')],
+        [Markup.button.callback('Неверная позиция', 'reject_wrong_item')],
+        [Markup.button.callback('Другая причина', 'reject_other')],
+        [Markup.button.callback('❌ Отмена', 'cancel_rejection')]
+      ]).reply_markup
+    }
   );
 });
 

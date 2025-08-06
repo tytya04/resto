@@ -76,17 +76,23 @@ const addScheduleScene = new Scenes.WizardScene(
     }
   },
   
-  // Шаг 2: Выбор времени
+  // Шаг 2: Обработка времени (для случая когда ресторан уже выбран) или выбор ресторана
   async (ctx) => {
-    if (ctx.callbackQuery?.data === 'cancel') {
-      await ctx.answerCbQuery('Отменено');
-      await ctx.deleteMessage();
+    // Обработка отмены
+    if (ctx.callbackQuery?.data === 'cancel' || ctx.message?.text === '/cancel') {
+      if (ctx.callbackQuery) {
+        await ctx.answerCbQuery('Отменено');
+        await ctx.deleteMessage();
+      } else {
+        await ctx.reply('❌ Отменено');
+      }
       return ctx.scene.leave();
     }
     
+    // Если это callback с выбором ресторана
     if (ctx.callbackQuery?.data?.startsWith('schedule_restaurant_')) {
       const restaurantId = parseInt(ctx.callbackQuery.data.split('_')[2]);
-      ctx.wizard.state.restaurantId = restaurantId;
+      ctx.wizard.state.selectedRestaurantId = restaurantId;
       
       await ctx.answerCbQuery();
       await ctx.editMessageText(
@@ -97,59 +103,60 @@ const addScheduleScene = new Scenes.WizardScene(
       
       return ctx.wizard.next();
     }
-  },
-  
-  // Шаг 3: Выбор дней недели
-  async (ctx) => {
-    if (!ctx.message?.text) return;
     
-    const timeRegex = /^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$/;
-    const match = ctx.message.text.match(timeRegex);
-    
-    if (!match) {
-      await ctx.reply('❌ Неверный формат времени. Используйте формат ЧЧ:ММ');
-      return;
-    }
-    
-    ctx.wizard.state.scheduleTime = ctx.message.text;
-    
-    const days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
-    ctx.wizard.state.selectedDays = [];
-    
-    const keyboard = {
-      reply_markup: {
-        inline_keyboard: [
-          days.slice(0, 4).map((day, i) => ({
-            text: day,
-            callback_data: `day_${i + 1}`
-          })),
-          days.slice(4, 7).map((day, i) => ({
-            text: day,
-            callback_data: `day_${i + 5}`
-          })),
-          [{ text: '✅ Подтвердить', callback_data: 'confirm_days' }],
-          [{ text: '❌ Отмена', callback_data: 'cancel' }]
-        ]
+    // Если это текст с временем (когда ресторан уже был выбран на шаге 1)
+    if (ctx.message?.text) {
+      const timeRegex = /^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$/;
+      const match = ctx.message.text.match(timeRegex);
+      
+      if (!match) {
+        await ctx.reply('❌ Неверный формат времени. Используйте формат ЧЧ:ММ (например, 09:00)');
+        return;
       }
-    };
-    
-    await ctx.reply(
-      '📅 <b>Выберите дни недели для автоматической отправки:</b>\n\n' +
-      'Нажмите на дни, чтобы выбрать их',
-      { parse_mode: 'HTML', ...keyboard }
-    );
-    
-    return ctx.wizard.next();
+      
+      ctx.wizard.state.scheduleTime = ctx.message.text;
+      
+      // Переходим к выбору дней недели
+      const days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+      ctx.wizard.state.selectedDays = [];
+      
+      const keyboard = {
+        reply_markup: {
+          inline_keyboard: [
+            days.slice(0, 4).map((day, i) => ({
+              text: day,
+              callback_data: `day_${i + 1}`
+            })),
+            days.slice(4, 7).map((day, i) => ({
+              text: day,
+              callback_data: `day_${i + 5}`
+            })),
+            [{ text: '✅ Подтвердить', callback_data: 'confirm_days' }],
+            [{ text: '❌ Отмена', callback_data: 'cancel' }]
+          ]
+        }
+      };
+      
+      await ctx.reply(
+        '📅 <b>Выберите дни недели для автоматической отправки:</b>\n\n' +
+        'Нажмите на дни, чтобы выбрать их',
+        { parse_mode: 'HTML', ...keyboard }
+      );
+      
+      return ctx.wizard.next();
+    }
   },
   
-  // Шаг 4: Подтверждение и сохранение
+  // Шаг 3: Обработка выбора дней недели
   async (ctx) => {
+    // Обработка отмены
     if (ctx.callbackQuery?.data === 'cancel') {
       await ctx.answerCbQuery('Отменено');
       await ctx.deleteMessage();
       return ctx.scene.leave();
     }
     
+    // Обработка выбора дня
     if (ctx.callbackQuery?.data?.startsWith('day_')) {
       const dayNum = parseInt(ctx.callbackQuery.data.split('_')[1]);
       const selectedDays = ctx.wizard.state.selectedDays || [];
@@ -186,6 +193,7 @@ const addScheduleScene = new Scenes.WizardScene(
       return;
     }
     
+    // Подтверждение выбора дней
     if (ctx.callbackQuery?.data === 'confirm_days') {
       const selectedDays = ctx.wizard.state.selectedDays || [];
       
@@ -194,34 +202,47 @@ const addScheduleScene = new Scenes.WizardScene(
         return;
       }
       
-      try {
-        const restaurant = ctx.wizard.state.restaurants.find(
-          r => r.id === ctx.wizard.state.restaurantId
-        );
-        
-        // Получаем пользователя по telegram_id
-        const { User } = require('../database/models');
-        const user = await User.findOne({
-          where: { telegram_id: ctx.from.id.toString() }
-        });
-        
-        // Создаем запись расписания
-        await ScheduledOrder.create({
-          restaurant_id: ctx.wizard.state.restaurantId,
-          schedule_time: ctx.wizard.state.scheduleTime,
-          schedule_days: JSON.stringify(selectedDays),
-          is_active: true,
-          created_by: user ? user.id : null
-        });
-        
-        const days = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
-        const selectedDaysStr = selectedDays
-          .sort((a, b) => a - b)
-          .map(d => days[d])
-          .join(', ');
-        
-        await ctx.answerCbQuery('✅ Расписание создано');
-        await ctx.editMessageText(
+      await ctx.answerCbQuery();
+      return ctx.wizard.next();
+    }
+  },
+  
+  // Шаг 4: Сохранение расписания
+  async (ctx) => {
+    try {
+      const selectedDays = ctx.wizard.state.selectedDays || [];
+      const restaurantId = ctx.wizard.state.selectedRestaurantId || ctx.wizard.state.restaurantId;
+      
+      // Получаем пользователя по telegram_id
+      const { User } = require('../database/models');
+      const user = await User.findOne({
+        where: { telegram_id: ctx.from.id.toString() }
+      });
+      
+      // Создаем запись расписания
+      await ScheduledOrder.create({
+        restaurant_id: restaurantId,
+        schedule_time: ctx.wizard.state.scheduleTime,
+        schedule_days: JSON.stringify(selectedDays),
+        is_active: true,
+        created_by: user ? user.id : null
+      });
+      
+      // Обновляем планировщик
+      const orderSchedulerService = require('../services/OrderSchedulerService');
+      await orderSchedulerService.updateRestaurantSchedule(restaurantId);
+      
+      // Получаем информацию о ресторане
+      const restaurant = await Restaurant.findByPk(restaurantId);
+      
+      const days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+      const selectedDaysStr = selectedDays
+        .sort((a, b) => a - b)
+        .map(d => days[d - 1])
+        .join(', ');
+      
+      await ctx.deleteMessage();
+      await ctx.reply(
           `✅ <b>Расписание успешно создано!</b>\n\n` +
           `🏢 Ресторан: ${restaurant.name}\n` +
           `⏰ Время: ${ctx.wizard.state.scheduleTime}\n` +
@@ -237,7 +258,6 @@ const addScheduleScene = new Scenes.WizardScene(
         await ctx.reply('❌ Ошибка при сохранении расписания');
         return ctx.scene.leave();
       }
-    }
   }
 );
 

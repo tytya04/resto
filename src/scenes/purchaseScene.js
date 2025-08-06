@@ -136,14 +136,40 @@ purchaseScene.action(/^quick_qty:(.+)$/, async (ctx) => {
 
 // Обработка текстового ввода
 purchaseScene.on('text', async (ctx) => {
-  const text = ctx.message.text;
+  const text = ctx.message.text.trim();
   const { step } = ctx.scene.session;
   
   if (step === 'enter_quantity') {
-    const quantity = parseFloat(text);
+    // Проверяем, не ввел ли пользователь сразу количество и сумму
+    const parts = text.split(/\s+/);
+    
+    if (parts.length === 2) {
+      // Пользователь ввел "количество сумма" одной строкой
+      // Заменяем запятую на точку для корректного парсинга дробных чисел
+      const quantity = parseFloat(parts[0].replace(',', '.'));
+      const price = parseFloat(parts[1].replace(',', '.'));
+      
+      if (isNaN(quantity) || quantity <= 0 || isNaN(price) || price <= 0) {
+        return ctx.reply('⚠️ Введите корректные количество и сумму (числа больше 0)\n\nПример: 10 2500');
+      }
+      
+      ctx.scene.session.purchasedQuantity = quantity;
+      ctx.scene.session.totalPrice = price;
+      ctx.scene.session.step = 'confirm_purchase';
+      
+      // Рассчитываем цену за единицу
+      const unitPrice = price / quantity;
+      
+      await showPurchaseSummary(ctx, unitPrice);
+      return;
+    }
+    
+    // Обработка одиночного ввода количества
+    // Заменяем запятую на точку для корректного парсинга
+    const quantity = parseFloat(text.replace(',', '.'));
     
     if (isNaN(quantity) || quantity <= 0) {
-      return ctx.reply('⚠️ Введите корректное количество (число больше 0)');
+      return ctx.reply('⚠️ Введите корректное количество (число больше 0)\n\nИли введите сразу количество и сумму через пробел.\nПример: 10 2500');
     }
     
     ctx.scene.session.purchasedQuantity = quantity;
@@ -160,7 +186,8 @@ purchaseScene.on('text', async (ctx) => {
     );
     
   } else if (step === 'enter_price') {
-    const price = parseFloat(text);
+    // Заменяем запятую на точку для корректного парсинга
+    const price = parseFloat(text.replace(',', '.'));
     
     if (isNaN(price) || price <= 0) {
       return ctx.reply('⚠️ Введите корректную сумму (число больше 0)');

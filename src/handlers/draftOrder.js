@@ -99,7 +99,7 @@ const startAddingProducts = async (ctx) => {
             }]
           });
           
-          let buttonText = `📍 ${branch.address}`;
+          let buttonText = `📍 ${branch.name || branch.address}`;
           if (branch.isMain) buttonText += ' (Главный)';
           if (existingDraft && existingDraft.draftOrderItems.length > 0) {
             buttonText += ` 📦 ${existingDraft.draftOrderItems.length}`;
@@ -489,35 +489,87 @@ const handleProductText = async (ctx) => {
       message += '❓ <b>Требуется уточнение:</b>\n';
       message += '<i>Эти продукты не найдены в каталоге. Выберите существующий продукт из списка или удалите позицию.</i>\n';
       
-      for (const { item, suggestions } of results.unmatched) {
-        message += `\n"${item.original_name}" - ${item.quantity} ${item.unit}\n`;
+      for (const { item, suggestions, line, parsed } of results.unmatched) {
+        // Если item не создан (например, при unit clarification с вариантами)
+        if (!item) {
+          message += `\n"${parsed?.name || line}" - ${parsed?.quantity || ''} ${parsed?.unit || ''}\n`;
+        } else {
+          message += `\n"${item.original_name}" - ${item.quantity} ${item.unit}\n`;
+        }
         
         if (suggestions.length > 0) {
-          const keyboard = {
-            reply_markup: {
-              inline_keyboard: suggestions.slice(0, 3).map(suggestion => [
-                {
-                  text: `✓ ${suggestion.product_name} (${suggestion.unit})`,
-                  callback_data: `draft_match:${item.id}:${suggestion.id}`
-                }
-              ])
-            }
-          };
-          
-          keyboard.reply_markup.inline_keyboard.push([
-            { text: '🔍 Искать другой продукт', callback_data: `draft_search_for:${item.id}` },
-            { text: '❌ Удалить позицию', callback_data: `draft_remove:${item.id}` }
-          ]);
-          
-          await ctx.reply(
-            `❓ <b>Продукт "${item.original_name}" не найден в каталоге</b>\n\n` +
-            `⚠️ <i>Новые продукты может добавлять только менеджер.</i>\n\n` +
-            `Выберите подходящий вариант из существующих:`,
-            { 
-              parse_mode: 'HTML',
-              ...keyboard 
-            }
-          );
+          // Если item не создан, используем временный подход через сессию
+          if (!item) {
+            // Создаем временный ID для сессии
+            const tempId = Date.now().toString(36) + Math.random().toString(36);
+            ctx.session.tempProducts = ctx.session.tempProducts || {};
+            ctx.session.tempProducts[tempId] = {
+              name: parsed.name,
+              quantity: parsed.quantity,
+              unit: parsed.unit || '',
+              draftOrderId: ctx.session.draftOrderId
+            };
+            
+            // Логируем suggestions для отладки
+            logger.info('Creating keyboard for suggestions:', {
+              suggestionsCount: suggestions.length,
+              firstSuggestion: suggestions[0],
+              tempId
+            });
+            
+            const keyboard = {
+              reply_markup: {
+                inline_keyboard: suggestions.slice(0, 10).map(suggestion => {
+                  // Проверяем данные
+                  if (!suggestion || !suggestion.product_name) {
+                    logger.error('Invalid suggestion:', suggestion);
+                    return null;
+                  }
+                  return [{
+                    text: `✓ ${suggestion.product_name} (${suggestion.unit})`,
+                    callback_data: `temp_match:${tempId}:${suggestion.id}`
+                  }];
+                }).filter(Boolean)
+              }
+            };
+            
+            await ctx.reply(
+              `❓ <b>Продукт "${parsed.name}" не найден в каталоге</b>\n\n` +
+              `⚠️ <i>Новые продукты может добавлять только менеджер.</i>\n\n` +
+              `Выберите подходящий вариант из существующих:`,
+              { 
+                parse_mode: 'HTML',
+                ...keyboard 
+              }
+            );
+          } else {
+            // Обычная обработка когда item создан
+            const keyboard = {
+              reply_markup: {
+                inline_keyboard: suggestions.slice(0, 10).map(suggestion => [
+                  {
+                    text: `✓ ${suggestion.product_name} (${suggestion.unit})`,
+                    callback_data: `draft_match:${item.id}:${suggestion.id}`
+                  }
+                ])
+              }
+            };
+            
+            keyboard.reply_markup.inline_keyboard.push([
+              { text: '🔍 Искать другой продукт', callback_data: `draft_search_for:${item.id}` },
+              { text: '❌ Удалить позицию', callback_data: `draft_remove:${item.id}` }
+            ]);
+            
+            await ctx.reply(
+              `❓ <b>Продукт "${item.original_name}" не найден в каталоге</b>\n\n` +
+              `⚠️ <i>Новые продукты может добавлять только менеджер.</i>\n\n` +
+              `Выберите подходящий вариант из существующих:`,
+              { 
+                parse_mode: 'HTML',
+                ...keyboard 
+              }
+            );
+          }
         } else {
           const keyboard = {
             reply_markup: {
@@ -609,6 +661,12 @@ const confirmProductMatch = async (ctx) => {
     
     const [, itemId, productId] = ctx.callbackQuery.data.split(':');
     
+    logger.info('confirmProductMatch handler:', { 
+      callbackData: ctx.callbackQuery.data,
+      itemId, 
+      productId 
+    });
+    
     const item = await draftOrderService.confirmProductMatch(itemId, productId);
     
     await ctx.editMessageText(
@@ -637,6 +695,7 @@ const viewDraft = async (ctx) => {
     // Сохраняем ID в сессии для последующих операций
     ctx.session = ctx.session || {};
     ctx.session.draftOrderId = draft.id;
+    ctx.session.addingProducts = true; // Включаем режим добавления продуктов
     
     if (!draft.draftOrderItems || draft.draftOrderItems.length === 0) {
       return ctx.reply('📋 Заказ пуст');
@@ -646,12 +705,13 @@ const viewDraft = async (ctx) => {
     
     // Добавляем информацию о филиале
     if (draft.branch) {
-      message += `🏢 Филиал: ${draft.branch.address}`;
+      message += `🏢 Филиал: ${draft.branch.name || draft.branch.address}`;
       if (draft.branch.isMain) message += ' (Главный)';
       message += '\n';
     }
     
-    message += `📅 Отправка: ${formatInTimezone(draft.scheduled_for)}\n\n`;
+    message += `📅 Отправка: ${formatInTimezone(draft.scheduled_for)}\n`;
+    message += '💡 <i>Вы можете добавлять продукты текстом!</i>\n\n';
     
     // Группируем по статусу
     const confirmed = draft.draftOrderItems.filter(i => i.status === 'matched' || i.status === 'confirmed');
@@ -1218,12 +1278,14 @@ const selectDraft = async (ctx) => {
     // Сохраняем выбранный черновик в сессии
     ctx.session = ctx.session || {};
     ctx.session.draftOrderId = draft.id;
+    ctx.session.addingProducts = true; // Включаем режим добавления продуктов
     
     let message = '📋 <b>Выбранный заказ:</b>\n';
     if (draft.branch) {
-      message += `📍 Филиал: ${draft.branch.address}\n`;
+      message += `📍 Филиал: ${draft.branch.name || draft.branch.address}\n`;
     }
     message += `📅 Отправка: ${formatInTimezone(draft.scheduled_for)}\n\n`;
+    message += '💡 <i>Теперь вы можете отправлять продукты текстом!</i>\n\n';
     
     if (!draft.draftOrderItems || draft.draftOrderItems.length === 0) {
       message += '📦 Заказ пока пуст.\n\n';

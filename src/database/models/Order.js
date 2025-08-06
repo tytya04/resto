@@ -24,7 +24,7 @@ const Order = sequelize.define('orders', {
     }
   },
   status: {
-    type: DataTypes.ENUM('draft', 'sent', 'processing', 'approved', 'rejected', 'completed', 'cancelled'),
+    type: DataTypes.ENUM('draft', 'sent', 'processing', 'approved', 'rejected', 'completed', 'cancelled', 'purchased'),
     defaultValue: 'draft',
     allowNull: false
   },
@@ -99,6 +99,11 @@ const Order = sequelize.define('orders', {
   manager_comment: {
     type: DataTypes.TEXT,
     allowNull: true
+  },
+  packing_status: {
+    type: DataTypes.ENUM('pending', 'ready'),
+    allowNull: true,
+    defaultValue: null
   },
   items_json: {
     type: DataTypes.TEXT,

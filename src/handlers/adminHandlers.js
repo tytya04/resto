@@ -100,24 +100,20 @@ const usersList = async (ctx, page = 0) => {
     // Формируем условия поиска
     const whereCondition = {};
     
-    // Если это менеджер, показываем только одобренных им пользователей
+    // Если это менеджер, показываем только пользователей из его ресторанов
     if (isManager) {
-      // Получаем ID пользователей из обработанных менеджером заявок
-      const { RegistrationRequest } = require('../database/models');
-      const approvedRequests = await RegistrationRequest.findAll({
-        where: {
-          processed_by: ctx.user.id,
-          status: 'approved'
-        },
-        attributes: ['telegram_id']
+      // Получаем рестораны, созданные этим менеджером
+      const managerRestaurants = await Restaurant.findAll({
+        where: { created_by: ctx.user.id },
+        attributes: ['id']
       });
       
-      const approvedTelegramIds = approvedRequests.map(req => req.telegram_id);
+      const restaurantIds = managerRestaurants.map(r => r.id);
       
-      if (approvedTelegramIds.length > 0) {
-        whereCondition.telegram_id = approvedTelegramIds;
+      if (restaurantIds.length > 0) {
+        whereCondition.restaurant_id = restaurantIds;
       } else {
-        // Если менеджер никого не одобрял, показываем пустой список
+        // Если у менеджера нет ресторанов, показываем пустой список
         whereCondition.id = -1; // Невозможный ID
       }
     }
@@ -227,6 +223,20 @@ const userManagement = async (ctx, userId) => {
     if (!user) {
       return ctx.reply('Пользователь не найден');
     }
+    
+    // Проверяем права доступа для менеджера
+    if (ctx.user.role === 'manager') {
+      // Менеджер может видеть только пользователей из своих ресторанов
+      const managerRestaurants = await Restaurant.findAll({
+        where: { created_by: ctx.user.id },
+        attributes: ['id']
+      });
+      const restaurantIds = managerRestaurants.map(r => r.id);
+      
+      if (!user.restaurant_id || !restaurantIds.includes(user.restaurant_id)) {
+        return ctx.reply('❌ У вас нет доступа к этому пользователю');
+      }
+    }
 
     const roleEmoji = {
       'admin': '👑',
@@ -259,29 +269,46 @@ const userManagement = async (ctx, userId) => {
       message += `Закупок выполнено: ${purchasesCount}\n`;
     }
 
+    // Формируем кнопки в зависимости от роли просматривающего
+    const buttons = [];
+    
+    if (ctx.user.role === 'admin') {
+      // Админ видит все кнопки
+      buttons.push([
+        { 
+          text: user.is_active ? '🚫 Заблокировать' : '✅ Разблокировать', 
+          callback_data: `admin_user_toggle_${user.id}` 
+        }
+      ]);
+      buttons.push([
+        { text: '🔄 Изменить роль', callback_data: `admin_user_role_${user.id}` },
+        { text: '🏢 Изменить ресторан', callback_data: `admin_user_restaurant_${user.id}` }
+      ]);
+      buttons.push([
+        { text: '📝 Редактировать данные', callback_data: `admin_user_edit_${user.id}` }
+      ]);
+      buttons.push([
+        { text: '🗑️ Удалить пользователя', callback_data: `admin_user_delete_${user.id}` }
+      ]);
+    } else if (ctx.user.role === 'manager') {
+      // Менеджер может только блокировать/разблокировать пользователей ресторанов
+      if (user.role === 'restaurant') {
+        buttons.push([
+          { 
+            text: user.is_active ? '🚫 Заблокировать' : '✅ Разблокировать', 
+            callback_data: `admin_user_toggle_${user.id}` 
+          }
+        ]);
+      }
+    }
+    
+    buttons.push([
+      { text: '🔙 К списку пользователей', callback_data: 'admin_users_list' }
+    ]);
+    
     const keyboard = {
       reply_markup: {
-        inline_keyboard: [
-          [
-            { 
-              text: user.is_active ? '🚫 Заблокировать' : '✅ Разблокировать', 
-              callback_data: `admin_user_toggle_${user.id}` 
-            }
-          ],
-          [
-            { text: '🔄 Изменить роль', callback_data: `admin_user_role_${user.id}` },
-            { text: '🏢 Изменить ресторан', callback_data: `admin_user_restaurant_${user.id}` }
-          ],
-          [
-            { text: '📝 Редактировать данные', callback_data: `admin_user_edit_${user.id}` }
-          ],
-          [
-            { text: '🗑️ Удалить пользователя', callback_data: `admin_user_delete_${user.id}` }
-          ],
-          [
-            { text: '🔙 К списку пользователей', callback_data: 'admin_users_list' }
-          ]
-        ]
+        inline_keyboard: buttons
       }
     };
 
@@ -1594,8 +1621,14 @@ const handleAdminCallbacks = async (ctx) => {
         
         // Если это ресторан, показываем выбор ресторана
         if (role === 'restaurant') {
+          // Для админов показываем все рестораны, для менеджеров только их
+          const whereCondition = { is_active: true };
+          if (ctx.user.role === 'manager') {
+            whereCondition.created_by = ctx.user.id;
+          }
+          
           const restaurants = await Restaurant.findAll({
-            where: { is_active: true },
+            where: whereCondition,
             order: [['name', 'ASC']]
           });
           

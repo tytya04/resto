@@ -342,6 +342,82 @@ class DraftOrderService {
             }
           }
           
+          // Проверяем, есть ли альтернативные варианты этого продукта (даже для unit clarification)
+          if (potentialMatch) {
+            const suggestions = await productMatcher.suggestProducts(parsed.name, 10);
+            const baseProductName = potentialMatch.product_name.toLowerCase();
+            const alternativeVariants = suggestions.filter(s => {
+              if (s.id === potentialMatch.id) return false;
+              
+              const variantName = s.product_name.toLowerCase();
+              const isRelated = variantName.includes(baseProductName.split(' ')[0]) || 
+                              baseProductName.includes(variantName.split(' ')[0]);
+              
+              return isRelated && s.score < 0.5; // Принимаем только релевантные варианты
+            });
+            
+            // Если найдены альтернативные варианты, предлагаем выбор вместо unit clarification
+            if (alternativeVariants.length > 0) {
+              logger.info('Found alternative variants during unit clarification:', {
+                query: parsed.name,
+                exactMatch: potentialMatch.product_name,
+                alternatives: alternativeVariants.map(a => a.product_name)
+              });
+              
+              // Добавляем основной продукт в начало списка предложений
+              const allVariants = [
+                { 
+                  id: potentialMatch.id,
+                  product_name: potentialMatch.product_name,
+                  category: potentialMatch.category,
+                  unit: potentialMatch.unit,
+                  last_purchase_price: potentialMatch.last_purchase_price,
+                  score: 0, 
+                  match_type: 'exact', 
+                  matched_term: potentialMatch.product_name 
+                },
+                ...alternativeVariants
+              ];
+              
+              // Добавляем в нераспознанные с предложениями
+              results.unmatched.push({
+                line,
+                parsed: {
+                  name: parsed.name,
+                  quantity: parsed.quantity,
+                  unit: parsed.unit
+                },
+                suggestions: allVariants
+              });
+              continue;
+            }
+          } else {
+            // Если точного совпадения нет, ищем похожие продукты
+            const suggestions = await productMatcher.suggestProducts(parsed.name, 10);
+            
+            // Фильтруем предложения с минимальным score
+            const relevantSuggestions = suggestions.filter(s => s.score < 0.5); // Принимаем продукты с score < 0.5
+            
+            if (relevantSuggestions.length > 0) {
+              logger.info('Found suggestions for product without exact match:', {
+                query: parsed.name,
+                suggestions: relevantSuggestions.map(s => ({ name: s.product_name, score: s.score }))
+              });
+              
+              // Добавляем в нераспознанные с предложениями
+              results.unmatched.push({
+                line,
+                parsed: {
+                  name: parsed.name,
+                  quantity: parsed.quantity,
+                  unit: parsed.unit
+                },
+                suggestions: relevantSuggestions
+              });
+              continue;
+            }
+          }
+          
           // Только если продукт не найден в черновике, добавляем для уточнения единицы
           results.needsUnitClarification.push({
             line,
@@ -356,14 +432,24 @@ class DraftOrderService {
         if (matchedProduct) {
           // Проверяем, есть ли альтернативные варианты этого продукта
           const suggestions = await productMatcher.suggestProducts(parsed.name, 10);
-          const alternativeVariants = suggestions.filter(s => 
-            s.id !== matchedProduct.id && 
-            s.product_name.toLowerCase().includes(parsed.name.toLowerCase()) &&
-            (s.product_name.includes('стандарт') || s.product_name.includes('отбор') || 
-             s.product_name.includes('премиум') || s.product_name.includes('эконом'))
-          );
           
-          // Если найдены альтернативные варианты качества, предлагаем выбор
+          // Фильтруем варианты, которые относятся к тому же базовому продукту
+          // Для синонимов проверяем по названию найденного продукта
+          const baseProductName = matchedProduct.product_name.toLowerCase();
+          const alternativeVariants = suggestions.filter(s => {
+            if (s.id === matchedProduct.id) return false; // Исключаем сам найденный продукт
+            
+            // Проверяем, относится ли вариант к тому же базовому продукту
+            const variantName = s.product_name.toLowerCase();
+            
+            // Для картофеля, лука и других продуктов с вариантами
+            const isRelated = variantName.includes(baseProductName.split(' ')[0]) || 
+                            baseProductName.includes(variantName.split(' ')[0]);
+            
+            return isRelated && s.score < 0.5; // Принимаем только релевантные варианты
+          });
+          
+          // Если найдены альтернативные варианты, предлагаем выбор
           if (alternativeVariants.length > 0) {
             logger.info('Found alternative variants:', {
               query: parsed.name,
@@ -391,7 +477,7 @@ class DraftOrderService {
               product_name: parsed.name,
               original_name: parsed.name,
               quantity: parsed.quantity,
-              unit: parsed.unit,
+              unit: parsed.unit || '',
               status: 'unmatched',
               matched_product_id: null,
               added_by: userId
@@ -483,7 +569,7 @@ class DraftOrderService {
             product_name: parsed.name,
             original_name: parsed.name,
             quantity: parsed.quantity,
-            unit: parsed.unit,
+            unit: parsed.unit || '',
             status: 'unmatched',
             matched_product_id: null,
             added_by: userId

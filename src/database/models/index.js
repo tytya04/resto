@@ -8,6 +8,7 @@ const ProductSynonym = require('./ProductSynonym');
 const RegistrationRequest = require('./RegistrationRequest');
 const Settings = require('./Settings');
 const Purchase = require('./Purchase');
+const PurchaseItem = require('./PurchaseItem');
 const PriceHistory = require('./PriceHistory');
 const ScheduledOrder = require('./ScheduledOrder');
 
@@ -26,6 +27,16 @@ User.belongsTo(Restaurant, {
 Restaurant.hasMany(User, { 
   foreignKey: 'restaurant_id',
   as: 'users'
+});
+
+// Restaurant - User (created_by)
+Restaurant.belongsTo(User, {
+  foreignKey: 'created_by',
+  as: 'creator'
+});
+User.hasMany(Restaurant, {
+  foreignKey: 'created_by',
+  as: 'createdRestaurants'
 });
 
 // Order - Restaurant
@@ -93,6 +104,17 @@ Settings.belongsTo(Restaurant, {
 Purchase.belongsTo(User, {
   foreignKey: 'buyer_id',
   as: 'buyer'
+});
+
+// Purchase - PurchaseItem
+Purchase.hasMany(PurchaseItem, {
+  foreignKey: 'purchase_id',
+  as: 'purchaseItems',
+  onDelete: 'CASCADE'
+});
+PurchaseItem.belongsTo(Purchase, {
+  foreignKey: 'purchase_id',
+  as: 'purchase'
 });
 
 // PriceHistory - User
@@ -198,6 +220,7 @@ module.exports = {
   RegistrationRequest,
   Settings,
   Purchase,
+  PurchaseItem,
   PriceHistory,
   ScheduledOrder,
   DraftOrder,

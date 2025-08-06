@@ -45,6 +45,11 @@ const NomenclatureCache = sequelize.define('nomenclature_cache', {
     type: DataTypes.DECIMAL(10, 3),
     allowNull: true
   },
+  technical_note: {
+    type: DataTypes.STRING(100),
+    allowNull: true,
+    defaultValue: null
+  },
   last_update: {
     type: DataTypes.DATE,
     defaultValue: DataTypes.NOW

@@ -27,6 +27,7 @@ const orderSchedulerService = require('./src/services/OrderSchedulerService');
 const emailSettings = require('./src/handlers/emailSettings');
 const adminHandlers = require('./src/handlers/adminHandlers');
 const draftOrderHandlers = require('./src/handlers/draftOrder');
+const OrderService = require('./src/services/OrderService');
 const draftOrderService = require('./src/services/DraftOrderService');
 const moment = require('moment');
 
@@ -443,9 +444,19 @@ bot.command('manager_menu', requireRole('manager'), managerHandlers.menu);
 bot.command('pending_orders', requireRole('manager'), managerHandlers.pendingOrders);
 bot.command('approve_order', requireRole('manager'), managerHandlers.approveOrder);
 
+// Обработчики кнопок для менеджера
+bot.action('pending_orders', requireRole('manager'), managerHandlers.pendingOrders);
+bot.action('consolidate_orders', requireRole(['manager', 'buyer']), procurementHandlers.consolidateOrders);
+bot.action('process_purchased_orders', requireRole('manager'), async (ctx) => {
+  await ctx.answerCbQuery('Загружаем заказы...');
+  // Показываем заказы со статусом 'purchased' для обработки
+  return managerHandlers.processPurchasedOrders(ctx);
+});
+
 bot.command('procurement_menu', requireRole('buyer'), procurementHandlers.menu);
 bot.command('consolidated_orders', requireRole('buyer'), procurementHandlers.consolidatedOrders);
 bot.command('consolidated_list', requireRole('buyer'), procurementHandlers.consolidatedList);
+bot.command('consolidate', requireRole('buyer'), procurementHandlers.consolidatedList);
 bot.command('mark_purchased', requireRole('buyer'), procurementHandlers.markPurchased);
 bot.command(/^purchase_(.+)$/, requireRole('buyer'), procurementHandlers.purchaseProductCommand);
 bot.command(/^continue_purchase_(\d+)$/, requireRole('buyer'), procurementHandlers.continuePurchase);
@@ -511,7 +522,7 @@ bot.action('menu_search_products', requireRole('restaurant'), restaurantHandlers
 bot.action('menu_create_order', requireRole('restaurant'), draftOrderHandlers.startAddingProducts);
 bot.action('menu_my_orders', requireRole('restaurant'), restaurantHandlers.myOrders);
 bot.action('my_orders', requireRole('restaurant'), restaurantHandlers.myOrders);
-bot.action('menu_consolidation', requireRole('buyer'), procurementHandlers.consolidatedOrders);
+bot.action('menu_consolidation', requireRole('buyer'), procurementHandlers.consolidatedList);
 bot.action('menu_purchases', requireRole('buyer'), procurementHandlers.purchases);
 bot.action('menu_reports', requireRole('buyer'), procurementHandlers.reports);
 
@@ -735,6 +746,168 @@ bot.action('report_order_analysis', requireRole('buyer'), analyticsHandlers.orde
 
 // Обработчики для функций закупщика (buyerHandlers)
 const buyerHandlers = require('./src/handlers/buyerHandlers');
+
+// Обработчики для новой системы закупок
+bot.action('start_purchase_session', requireRole('buyer'), procurementHandlers.startPurchaseSession);
+bot.action('continue_purchase_session', requireRole('buyer'), procurementHandlers.continuePurchaseSession);
+bot.action('cancel_purchase_session', requireRole('buyer'), async (ctx) => {
+  await ctx.answerCbQuery('Отмена закупки...');
+  // TODO: реализовать отмену закупки
+  ctx.reply('❌ Закупка отменена');
+});
+bot.action('show_purchase_list', requireRole('buyer'), async (ctx) => {
+  await ctx.answerCbQuery('Загружаем список...');
+  
+  try {
+    const { Purchase, PurchaseItem } = require('./src/database/models');
+    
+    // Находим активную закупку
+    const purchase = await Purchase.findOne({
+      where: {
+        buyer_id: ctx.user.id,
+        status: ['pending', 'in_progress'],
+        product_name: 'Закупочная сессия'
+      }
+    });
+    
+    if (!purchase) {
+      return ctx.reply('❌ Активная закупка не найдена');
+    }
+    
+    // Получаем все товары в закупке
+    const items = await PurchaseItem.findAll({
+      where: { purchase_id: purchase.id },
+      order: [['product_name', 'ASC']]
+    });
+    
+    if (items.length === 0) {
+      return ctx.reply('📋 Товаров в закупке не найдено');
+    }
+    
+    // Формируем сообщение со списком и создаем кнопки
+    let message = '📋 <b>Список товаров в закупке</b>\n\n';
+    const keyboard = [];
+    let currentRow = [];
+    
+    items.forEach((item, index) => {
+      const status = item.status === 'completed' ? '✅' : '⏳';
+      const price = item.purchased_quantity > 0 ? ` - ${item.purchase_price}₽` : '';
+      
+      message += `${status} <b>${item.product_name}</b>\n`;
+      message += `   📏 ${item.required_quantity} ${item.unit}`;
+      if (item.purchased_quantity > 0) {
+        message += ` → ${item.purchased_quantity} ${item.unit}${price}`;
+      }
+      message += '\n\n';
+      
+      // Добавляем кнопку для товара (только если не завершен)
+      if (item.status !== 'completed') {
+        const buttonText = `📦 ${item.product_name.length > 15 ? item.product_name.substring(0, 15) + '...' : item.product_name}`;
+        currentRow.push({ text: buttonText, callback_data: `purchase_item:${item.id}` });
+        
+        // Добавляем ряд, если в нем 2 кнопки, или это последний элемент
+        if (currentRow.length === 2 || index === items.length - 1) {
+          keyboard.push([...currentRow]);
+          currentRow = [];
+        }
+      }
+    });
+    
+    // Добавляем управляющие кнопки
+    keyboard.push([
+      { text: '🔄 Обновить', callback_data: 'show_purchase_list' },
+      { text: '↩️ Назад к закупке', callback_data: 'continue_purchase_session' }
+    ]);
+    
+    await ctx.reply(message, {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: keyboard }
+    });
+    
+  } catch (error) {
+    logger.error('Error in show_purchase_list:', error);
+    ctx.reply('❌ Произошла ошибка при загрузке списка товаров');
+  }
+});
+bot.action('confirm_finish_purchase', requireRole('buyer'), procurementHandlers.confirmFinishPurchase);
+
+// Обработчики для сборки корзин
+bot.action(/^start_packing:(\d+)$/, requireRole('buyer'), procurementHandlers.startPacking);
+bot.action(/^mark_packed:(\d+)$/, requireRole('buyer'), procurementHandlers.markPacked);
+bot.action('back_to_packing_list', requireRole('buyer'), procurementHandlers.backToPackingList);
+bot.action(/^finish_all_packing:(\d+)$/, requireRole('buyer'), procurementHandlers.finishAllPacking);
+bot.action(/^refresh_packing:(\d+)$/, requireRole('buyer'), procurementHandlers.backToPackingList);
+
+// Обработчик выбора товара из списка для закупки
+bot.action(/^purchase_item:(\d+)$/, requireRole('buyer'), async (ctx) => {
+  const itemId = parseInt(ctx.match[1]);
+  await ctx.answerCbQuery('Выбираем товар...');
+  
+  try {
+    const { PurchaseItem } = require('./src/database/models');
+    
+    // Находим товар
+    const item = await PurchaseItem.findByPk(itemId);
+    if (!item || item.status === 'completed') {
+      return ctx.reply('❌ Товар не найден или уже закуплен');
+    }
+    
+    // Устанавливаем сессию для ввода данных о закупке
+    ctx.session = ctx.session || {};
+    ctx.session.awaitingPurchaseInput = true;
+    ctx.session.currentPurchaseItemId = itemId;
+    
+    await ctx.reply(
+      `🛒 <b>Закупка товара</b>\n\n` +
+      `📦 <b>${item.product_name}</b>\n` +
+      `📏 Необходимо: ${item.required_quantity} ${item.unit}\n\n` +
+      `Введите через пробел:\n` +
+      `• Количество закупленного товара\n` +
+      `• Общую сумму закупки\n\n` +
+      `Пример: 10 2500`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '⏭️ Пропустить товар', callback_data: `skip_purchase_item:${itemId}` }],
+            [{ text: '📋 Список товаров', callback_data: 'show_purchase_list' }],
+            [{ text: '❌ Отменить', callback_data: 'continue_purchase_session' }]
+          ]
+        }
+      }
+    );
+    
+  } catch (error) {
+    logger.error('Error in purchase_item:', error);
+    ctx.reply('❌ Произошла ошибка при выборе товара');
+  }
+});
+bot.action(/^skip_purchase_item:(\d+)$/, requireRole('buyer'), async (ctx) => {
+  const itemId = ctx.match[1];
+  await ctx.answerCbQuery('Пропускаем товар...');
+  // TODO: реализовать пропуск товара
+  ctx.reply('⏭️ Товар пропущен');
+});
+
+// Обработчик для начала закупки конкретного продукта (старый метод)
+bot.action(/^purchase_start:(.+)$/, requireRole('buyer'), async (ctx) => {
+  const consolidatedProductId = ctx.match[1];
+  await ctx.answerCbQuery('Начинаем закупку...');
+  
+  // Вызываем сцену закупки
+  const consolidated = await OrderService.getConsolidatedOrders();
+  const product = consolidated.find(item => item.consolidated_product_id === consolidatedProductId);
+  
+  if (!product) {
+    return ctx.reply('❌ Продукт не найден в консолидированном списке');
+  }
+  
+  return ctx.scene.enter('purchase_product', {
+    consolidatedProductId,
+    consolidatedProduct: product
+  });
+});
+
 bot.action('buyer_start_purchase', requireRole('buyer'), buyerHandlers.handleCallbacks);
 bot.action('buyer_next_product', requireRole('buyer'), buyerHandlers.handleCallbacks);
 bot.action('buyer_show_list', requireRole('buyer'), buyerHandlers.handleCallbacks);
@@ -796,8 +969,8 @@ bot.action('profile_edit_phone', async (ctx) => {
 });
 
 // Обработчики команд для обработки заказов менеджером
-bot.command(/^process_order_\d+$/, managerHandlers.processOrderCommand);
-bot.command(/^continue_process_\d+$/, managerHandlers.continueProcessOrder);
+bot.command(/^process_order_\d+$/, requireRole('manager'), managerHandlers.processOrderCommand);
+bot.command(/^continue_process_\d+$/, requireRole('manager'), managerHandlers.continueProcessOrder);
 
 // Команда для управления расписанием для менеджера
 bot.command(/^schedule_\d+$/, requireRole(['manager', 'admin']), async (ctx) => {
@@ -856,7 +1029,7 @@ bot.command('restaurants', requireAdmin, adminHandlers.restaurantsList);
 bot.command('settings', requireAdmin, adminHandlers.systemSettings);
 bot.command('backup', requireAdmin, adminHandlers.createBackup);
 bot.command('stats', requireAdmin, adminHandlers.systemStats);
-bot.command(/^user_(\d+)$/, requireAdmin, adminHandlers.userManagement);
+bot.command(/^user_(\d+)$/, requireRole(['admin', 'manager']), adminHandlers.handleUserCommand);
 bot.command(/^restaurant_(\d+)$/, requireAdmin, async (ctx) => {
   const restaurantId = ctx.match[1];
   return adminHandlers.restaurantManagement(ctx, restaurantId);
@@ -917,6 +1090,56 @@ bot.action(/^select_draft:(\d+)$/, requireRole('restaurant'), draftOrderHandlers
 bot.action(/^draft_edit_item:(\d+)$/, requireRole('restaurant'), draftOrderHandlers.editDraftItem);
 bot.action(/^draft_change_qty:(\d+)$/, requireRole('restaurant'), draftOrderHandlers.changeDraftItemQuantity);
 bot.action(/^draft_match:(\d+):(\d+)$/, requireRole('restaurant'), draftOrderHandlers.confirmProductMatch);
+bot.action(/^temp_match:(.+):(\d+)$/, requireRole('restaurant'), async (ctx) => {
+  try {
+    const [tempId, productId] = ctx.match.slice(1);
+    
+    // Получаем временные данные
+    const tempData = ctx.session.tempProducts?.[tempId];
+    if (!tempData) {
+      return ctx.answerCbQuery('❌ Данные продукта устарели');
+    }
+    
+    // Создаем DraftOrderItem
+    const { DraftOrderItem, NomenclatureCache } = require('./src/database/models');
+    const draftOrderService = require('./src/services/DraftOrderService');
+    
+    const item = await DraftOrderItem.create({
+      draft_order_id: tempData.draftOrderId,
+      product_name: tempData.name,
+      original_name: tempData.name,
+      quantity: tempData.quantity,
+      unit: tempData.unit,
+      status: 'unmatched',
+      matched_product_id: null,
+      added_by: ctx.user.id
+    });
+    
+    logger.info('Created draft item:', { id: item.id, productId });
+    
+    // Вызываем confirmProductMatch напрямую через сервис
+    const updatedItem = await draftOrderService.confirmProductMatch(item.id, productId);
+    
+    // Отвечаем на callback query
+    await ctx.answerCbQuery('✅ Продукт подтвержден');
+    
+    // Обновляем сообщение
+    await ctx.editMessageText(
+      `✅ Подтверждено: ${updatedItem.product_name} - ${updatedItem.quantity} ${updatedItem.unit}`
+    );
+    
+    // Удаляем временные данные
+    delete ctx.session.tempProducts[tempId];
+    
+    // Через секунду показываем обновленный черновик
+    setTimeout(() => {
+      draftOrderHandlers.viewDraft(ctx);
+    }, 1000);
+  } catch (error) {
+    logger.error('Error in temp_match handler:', error);
+    await ctx.answerCbQuery('❌ Произошла ошибка');
+  }
+});
 bot.action(/^draft_remove:(\d+)$/, requireRole('restaurant'), draftOrderHandlers.removeItem);
 bot.action(/^unit_clarify:(.+):(.+)(?::(.+))?$/, requireRole('restaurant'), draftOrderHandlers.handleUnitClarification);
 bot.action(/^draft_search_for:(\d+)$/, requireRole('restaurant'), async (ctx) => {
@@ -1028,7 +1251,7 @@ bot.hears('👥 Управление пользователями', requireRole(
 });
 bot.hears('📊 Статистика', requireRole('manager'), analyticsHandlers.managerDashboard);
 
-bot.hears('📊 Консолидация', requireRole('buyer'), procurementHandlers.consolidatedOrders);
+bot.hears('📊 Консолидация', requireRole('buyer'), procurementHandlers.consolidatedList);
 bot.hears('🛒 Закупки', requireRole('buyer'), procurementHandlers.purchases);
 bot.hears('📈 Отчеты', requireRole('buyer'), procurementHandlers.reports);
 
@@ -1135,11 +1358,96 @@ bot.on('text', async (ctx) => {
     if (handled) return;
   }
   
+  // Проверяем ввод данных для закупки
+  if (ctx.session?.awaitingPurchaseInput && ctx.session?.currentPurchaseItemId) {
+    const text = ctx.message.text.trim();
+    const parts = text.split(/\s+/);
+    
+    if (parts.length !== 2) {
+      return ctx.reply(
+        '❌ Неверный формат ввода.\n\n' +
+        'Введите через пробел:\n' +
+        '• Количество закупленного товара\n' +
+        '• Общую сумму закупки\n\n' +
+        'Пример: 10 2500'
+      );
+    }
+    
+    // Заменяем запятую на точку для корректного парсинга дробных чисел
+    const quantity = parseFloat(parts[0].replace(',', '.'));
+    const totalPrice = parseFloat(parts[1].replace(',', '.'))
+    
+    if (isNaN(quantity) || quantity <= 0 || isNaN(totalPrice) || totalPrice <= 0) {
+      return ctx.reply('❌ Количество и сумма должны быть положительными числами');
+    }
+    
+    try {
+      const { PurchaseItem } = require('./src/database/models');
+      
+      // Обновляем данные о закупке товара
+      const purchaseItem = await PurchaseItem.findByPk(ctx.session.currentPurchaseItemId);
+      if (!purchaseItem) {
+        return ctx.reply('❌ Товар не найден');
+      }
+      
+      await purchaseItem.update({
+        purchased_quantity: quantity,
+        purchase_price: totalPrice,
+        status: 'completed',
+        purchased_at: new Date()
+      });
+      
+      // Обновляем счетчик в основной закупке
+      const { Purchase } = require('./src/database/models');
+      const purchase = await Purchase.findByPk(purchaseItem.purchase_id);
+      if (purchase) {
+        await purchase.increment('completed_items');
+      }
+      
+      // Очищаем сессию
+      delete ctx.session.awaitingPurchaseInput;
+      delete ctx.session.currentPurchaseItemId;
+      
+      await ctx.reply(
+        `✅ <b>Товар закуплен!</b>\n\n` +
+        `📦 ${purchaseItem.product_name}\n` +
+        `📏 Количество: ${quantity.toString().replace('.', ',')} ${purchaseItem.unit}\n` +
+        `💰 Сумма: ${totalPrice.toString().replace('.', ',')} ₽\n` +
+        `💵 Цена за ${purchaseItem.unit}: ${(totalPrice / quantity).toFixed(2).replace('.', ',')} ₽`,
+        { parse_mode: 'HTML' }
+      );
+      
+      // Продолжаем закупку следующего товара
+      return procurementHandlers.continuePurchaseSession(ctx);
+      
+    } catch (error) {
+      logger.error('Error processing purchase input:', error);
+      return ctx.reply('❌ Произошла ошибка при сохранении данных');
+    }
+  }
+  
   // Проверяем добавление продуктов в черновик
   if (ctx.session?.addingProducts && ctx.user?.role === 'restaurant') {
     const handled = await draftOrderHandlers.handleProductText(ctx);
     if (handled) return;
   }
+  
+  // Отключено автоматическое создание заказа при вводе текста с продуктами
+  // Это вызывало проблемы, так как требовало выбора филиала
+  // Пользователи должны явно нажать "Создать заказ"
+  /*
+  if (ctx.user?.role === 'restaurant' && !ctx.session?.addingProducts) {
+    const text = ctx.message.text.trim();
+    // Проверяем, похоже ли это на ввод продуктов (содержит цифры или типичные единицы измерения)
+    if (/\d+|кг|шт|л|уп|кор|ящ/i.test(text)) {
+      // Автоматически начинаем создание заказа
+      await draftOrderHandlers.startAddingProducts(ctx);
+      // Обрабатываем введённый текст как продукт
+      const handled = await draftOrderHandlers.handleProductText(ctx);
+      if (handled) return;
+    }
+  }
+  */
   
   // Проверяем ввод времени для настроек
   if (await settingsHandlers.handleTimeTextInput(ctx)) {
@@ -1325,6 +1633,12 @@ bot.on('text', async (ctx) => {
       if (handled) return;
     }
     
+    // Проверяем команду /user_ для менеджеров
+    if (ctx.message.text.match(/^\/user_(\d+)$/)) {
+      const handled = await adminHandlers.handleTextCommands(ctx);
+      if (handled) return;
+    }
+    
     // Остальные команды только для админов
     if (ctx.user.role === 'admin') {
       // Проверяем редактирование расписания
@@ -1479,7 +1793,7 @@ bot.on('text', async (ctx) => {
   
   // Обработка кнопок постоянной клавиатуры для закупщика
   if (text === '📊 Консолидация' && ctx.user && ctx.user.role === 'buyer') {
-    return procurementHandlers.consolidatedOrders(ctx);
+    return procurementHandlers.consolidatedList(ctx);
   }
   
   if (text === '🛒 Закупки' && ctx.user && ctx.user.role === 'buyer') {

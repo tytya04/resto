@@ -207,6 +207,9 @@ class OrderSchedulerService {
       // Уведомляем менеджеров о новых заказах
       await this.notifyManagersAboutNewOrders(sentOrders);
       
+      // Уведомляем закупщиков о новых заказах для консолидации
+      await this.notifyBuyersAboutNewOrders(sentOrders);
+      
       logger.info(`Successfully sent ${sentOrders.length} orders for restaurant ${restaurantId}`);
       
     } catch (error) {
@@ -245,24 +248,38 @@ class OrderSchedulerService {
         await notificationService.sendToTelegramId(manager.telegram_id, message, { parse_mode: 'HTML' });
       }
       
-      // Уведомляем сотрудников ресторана
+      // Уведомляем всех сотрудников ресторана
       const restaurantUsers = await User.findAll({
         where: {
           restaurant_id: restaurantId,
-          role: 'restaurant'
+          role: 'restaurant',
+          is_active: true
         }
       });
       
-      const userMessage = `📤 <b>Ваши заказы отправлены</b>\n\n` +
-        `Автоматическая отправка выполнена в ${moment().format('HH:mm')}\n` +
-        `Отправлено заказов: ${sentOrders.length}\n\n` +
-        `⚠️ Заказы больше нельзя редактировать`;
-      
+      // Для каждого пользователя ресторана отправляем персонализированное сообщение
       for (const user of restaurantUsers) {
         const userOrders = sentOrders.filter(o => o.user_id === user.id);
+        
+        let userMessage = `📤 <b>Автоматическая отправка заказов</b>\n\n`;
+        userMessage += `🏢 Ресторан: ${restaurant.name}\n`;
+        userMessage += `⏰ Время отправки: ${formatInTimezone(new Date(), 'HH:mm')}\n`;
+        userMessage += `📅 Дата: ${formatInTimezone(new Date(), 'DD.MM.YYYY')}\n\n`;
+        
         if (userOrders.length > 0) {
-          await notificationService.sendToTelegramId(user.telegram_id, userMessage, { parse_mode: 'HTML' });
+          userMessage += `✅ <b>Ваши заказы отправлены (${userOrders.length}):</b>\n`;
+          userOrders.forEach(order => {
+            userMessage += `• Заказ #${order.order_number}\n`;
+          });
+          userMessage += `\n⚠️ Отправленные заказы больше нельзя редактировать`;
+        } else if (sentOrders.length > 0) {
+          userMessage += `📊 Всего отправлено заказов: ${sentOrders.length}\n`;
+          userMessage += `ℹ️ У вас не было черновиков для отправки`;
+        } else {
+          userMessage += `ℹ️ Не было черновиков для отправки`;
         }
+        
+        await notificationService.sendToTelegramId(user.telegram_id, userMessage, { parse_mode: 'HTML' });
       }
       
     } catch (error) {
@@ -302,9 +319,31 @@ class OrderSchedulerService {
       
       if (managers.length === 0) return;
       
+      // Получаем детальную информацию о заказах
+      const { Order, OrderItem } = require('../database/models');
+      const detailedOrders = await Order.findAll({
+        where: {
+          id: orders.map(o => o.id)
+        },
+        include: [
+          {
+            model: OrderItem,
+            as: 'orderItems'
+          },
+          {
+            model: User,
+            as: 'user'
+          },
+          {
+            model: Restaurant,
+            as: 'restaurant'
+          }
+        ]
+      });
+      
       // Группируем заказы по ресторанам
       const ordersByRestaurant = {};
-      orders.forEach(order => {
+      detailedOrders.forEach(order => {
         const restaurantName = order.restaurant.name;
         if (!ordersByRestaurant[restaurantName]) {
           ordersByRestaurant[restaurantName] = [];
@@ -312,25 +351,111 @@ class OrderSchedulerService {
         ordersByRestaurant[restaurantName].push(order);
       });
       
-      let message = '📥 <b>Новые заказы для обработки!</b>\n\n';
+      let message = '📥 <b>Новые заявки:</b>\n\n';
       
       Object.entries(ordersByRestaurant).forEach(([restaurantName, restaurantOrders]) => {
-        message += `🏢 <b>${restaurantName}</b>\n`;
+        message += `\n🏢 <b>${restaurantName}</b>\n`;
         restaurantOrders.forEach(order => {
-          message += `• Заказ #${order.order_number}\n`;
+          const orderTime = formatInTimezone(order.created_at, 'HH:mm');
+          message += `\n📋 Заказ #${order.order_number} (${orderTime})\n`;
+          message += `👤 ${order.user.first_name || order.user.username}\n`;
+          message += `📦 Позиций: ${order.orderItems.length}\n`;
+          
+          // Показываем первые 3 позиции
+          const itemsToShow = order.orderItems.slice(0, 3);
+          itemsToShow.forEach(item => {
+            message += `  • ${item.product_name} - ${item.quantity} ${item.unit}\n`;
+          });
+          if (order.orderItems.length > 3) {
+            message += `  • ...и еще ${order.orderItems.length - 3} позиций\n`;
+          }
+          
+          message += `💰 Сумма: ${order.total_amount || 'не указана'} ₽\n`;
         });
-        message += '\n';
       });
       
-      message += '💡 Используйте /pending_orders для просмотра';
+      message += '\n\n📊 Заказы отправлены закупщикам для консолидации\n';
+      message += '💡 Вы сможете обработать заказы после завершения закупки';
+      
+      // Добавляем кнопки для просмотра
+      const keyboard = {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '📋 Просмотреть заказы', callback_data: 'pending_orders' }],
+            [{ text: '📊 Консолидированный список', callback_data: 'manager_consolidated' }]
+          ]
+        }
+      };
       
       // Отправляем уведомление каждому менеджеру
       for (const manager of managers) {
-        await notificationService.sendToTelegramId(manager.telegram_id, message, { parse_mode: 'HTML' });
+        await notificationService.sendToTelegramId(manager.telegram_id, message, { 
+          parse_mode: 'HTML',
+          ...keyboard 
+        });
       }
       
     } catch (error) {
       logger.error('Error notifying managers about new orders:', error);
+    }
+  }
+  
+  // Уведомление закупщиков о новых заказах
+  async notifyBuyersAboutNewOrders(orders) {
+    try {
+      const buyers = await User.findAll({
+        where: { role: 'buyer' }
+      });
+      
+      if (buyers.length === 0) return;
+      
+      // Получаем детальную информацию о заказах
+      const { Order, OrderItem } = require('../database/models');
+      const detailedOrders = await Order.findAll({
+        where: {
+          id: orders.map(o => o.id)
+        },
+        include: [
+          {
+            model: OrderItem,
+            as: 'orderItems'
+          },
+          {
+            model: Restaurant,
+            as: 'restaurant'
+          }
+        ]
+      });
+      
+      let message = '📦 <b>Новые заказы для консолидации!</b>\n\n';
+      message += `📅 Дата: ${formatInTimezone(new Date(), 'DD.MM.YYYY')}\n`;
+      message += `🔢 Количество заказов: ${detailedOrders.length}\n\n`;
+      
+      // Группируем по ресторанам
+      const ordersByRestaurant = {};
+      detailedOrders.forEach(order => {
+        const restaurantName = order.restaurant.name;
+        if (!ordersByRestaurant[restaurantName]) {
+          ordersByRestaurant[restaurantName] = [];
+        }
+        ordersByRestaurant[restaurantName].push(order);
+      });
+      
+      Object.entries(ordersByRestaurant).forEach(([restaurantName, restaurantOrders]) => {
+        message += `🏢 <b>${restaurantName}</b>: ${restaurantOrders.length} заказов\n`;
+      });
+      
+      message += '\n💡 Используйте /consolidate для просмотра и консолидации';
+      
+      // Отправляем уведомление каждому закупщику
+      for (const buyer of buyers) {
+        await notificationService.sendToTelegramId(buyer.telegram_id, message, { parse_mode: 'HTML' });
+      }
+      
+      logger.info(`Notified ${buyers.length} buyers about ${orders.length} new orders`);
+      
+    } catch (error) {
+      logger.error('Error notifying buyers about new orders:', error);
     }
   }
 

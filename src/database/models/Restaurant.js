@@ -80,6 +80,14 @@ const Restaurant = sequelize.define('restaurants', {
   accountant_email: {
     type: DataTypes.STRING(100),
     allowNull: true
+  },
+  created_by: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    references: {
+      model: 'users',
+      key: 'id'
+    }
   }
 }, {
   indexes: [

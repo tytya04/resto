@@ -1,4 +1,4 @@
-const { Order, OrderItem, User, Restaurant, Purchase, PriceHistory } = require('../database/models');
+const { Order, OrderItem, User, Restaurant, Purchase, PriceHistory, NomenclatureCache } = require('../database/models');
 const { generateOrderNumber } = require('../database/init');
 const logger = require('../utils/logger');
 const { notificationService } = require('./NotificationService');
@@ -278,9 +278,33 @@ class OrderService {
   }
 
   // Получение заказов для обработки (для менеджеров)
-  static async getPendingOrders(limit = 20) {
+  static async getPendingOrders(limit = 20, userId = null, userRole = null) {
+    const { Op } = require('sequelize');
+    const whereCondition = { 
+      status: {
+        [Op.in]: ['sent', 'purchased']
+      }
+    };
+    
+    // Если это менеджер, показываем только заказы из его ресторанов
+    if (userRole === 'manager' && userId) {
+      const { Restaurant } = require('../database/models');
+      const managerRestaurants = await Restaurant.findAll({
+        where: { created_by: userId },
+        attributes: ['id']
+      });
+      
+      const restaurantIds = managerRestaurants.map(r => r.id);
+      if (restaurantIds.length > 0) {
+        whereCondition.restaurant_id = restaurantIds;
+      } else {
+        // Если у менеджера нет ресторанов, возвращаем пустой список
+        return [];
+      }
+    }
+    
     return Order.findAll({
-      where: { status: 'sent' },
+      where: whereCondition,
       include: [
         {
           model: OrderItem,
@@ -303,9 +327,10 @@ class OrderService {
 
   // Получение консолидированных заказов (для закупщиков)
   static async getConsolidatedOrders(dateFrom = null, dateTo = null, includeInProgress = false) {
-    const statusConditions = ['approved'];
+    // Закупщик видит все отправленные заказы сразу
+    const statusConditions = ['sent'];
     if (includeInProgress) {
-      statusConditions.push('processing');
+      statusConditions.push('processing', 'approved');
     }
     
     const where = { 
@@ -341,6 +366,31 @@ class OrderService {
       ]
     });
 
+    // Получаем все уникальные продукты для запроса technical_note
+    const uniqueProductNames = new Set();
+    orders.forEach(order => {
+      order.orderItems.forEach(item => {
+        uniqueProductNames.add(item.product_name);
+      });
+    });
+
+    // Получаем technical_note для всех продуктов
+    const productNotes = {};
+    if (uniqueProductNames.size > 0) {
+      const products = await NomenclatureCache.findAll({
+        where: {
+          product_name: Array.from(uniqueProductNames)
+        },
+        attributes: ['product_name', 'technical_note']
+      });
+      
+      products.forEach(product => {
+        if (product.technical_note) {
+          productNotes[product.product_name] = product.technical_note;
+        }
+      });
+    }
+
     // Группируем по продуктам
     const consolidated = {};
     
@@ -354,6 +404,7 @@ class OrderService {
             product_name: item.product_name,
             unit: item.unit,
             category: item.category,
+            technical_note: productNotes[item.product_name] || null,
             total_quantity: 0,
             restaurants: new Set(),
             orders: [],
@@ -380,6 +431,12 @@ class OrderService {
           price: price,
           total: total
         });
+        
+        // Добавляем Set для отслеживания уникальных заказов
+        if (!consolidated[key].unique_orders) {
+          consolidated[key].unique_orders = new Set();
+        }
+        consolidated[key].unique_orders.add(order.id);
       });
     });
 
@@ -394,7 +451,7 @@ class OrderService {
       return {
         ...item,
         restaurants: Array.from(item.restaurants),
-        orders_count: item.orders.length,
+        orders_count: item.unique_orders ? item.unique_orders.size : item.orders.length, // Считаем уникальные заказы
         restaurants_count: item.restaurants.size
       };
     });

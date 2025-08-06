@@ -17,9 +17,10 @@ const menu = async (ctx) => {
   const keyboard = Markup.keyboard([
     ['📋 Заявки', '👥 Управление пользователями'],
     ['🏢 Рестораны', '📊 Статистика'],
-    ['📑 Сводка заказов', '💰 Рентабельность'],
-    ['📈 Обновить цены', '📧 Email настройки'],
-    ['⚙️ Настройки', '🔙 Главное меню']
+    ['🔧 Настройка расписания', '📑 Сводка заказов'],
+    ['💰 Рентабельность', '📈 Обновить цены'],
+    ['📧 Email настройки', '⚙️ Настройки'],
+    ['🔙 Главное меню']
   ]).resize();
 
   await ctx.reply(
@@ -35,7 +36,7 @@ const menu = async (ctx) => {
 // Список новых заявок
 const pendingOrders = async (ctx) => {
   try {
-    const orders = await OrderService.getPendingOrders(50);
+    const orders = await OrderService.getPendingOrders(50, ctx.user.id, ctx.user.role);
 
     if (orders.length === 0) {
       return ctx.reply('📋 Нет новых заявок для обработки');
@@ -62,10 +63,14 @@ const pendingOrders = async (ctx) => {
           minute: '2-digit' 
         });
         
-        message += `\n📋 Заказ #${order.order_number} (${time})\n`;
+        const statusIcon = order.status === 'purchased' ? '💰' : '📋';
+        const statusText = order.status === 'purchased' ? ' (после закупки)' : '';
+        
+        message += `\n${statusIcon} Заказ #${order.order_number} (${time})${statusText}\n`;
         message += `👤 ${order.user.first_name || order.user.username}\n`;
         message += `📦 Позиций: ${order.orderItems.length}\n`;
         message += `💰 Сумма: ${order.total_amount || 'не указана'} ₽\n`;
+        message += `✏️ Обработать: /process_order_${order.id}\n`;
       });
     });
 
@@ -286,6 +291,69 @@ const manageRestaurantSchedule = async (ctx, restaurantId) => {
   }
 };
 
+// Показать пользователей ресторана
+const showRestaurantUsers = async (ctx, restaurantId) => {
+  try {
+    // Проверяем права доступа для менеджера
+    if (ctx.user.role === 'manager') {
+      const restaurant = await Restaurant.findOne({
+        where: { id: restaurantId, created_by: ctx.user.id }
+      });
+      
+      if (!restaurant) {
+        return ctx.reply('❌ У вас нет доступа к этому ресторану');
+      }
+    }
+    
+    const users = await User.findAll({
+      where: { 
+        restaurant_id: restaurantId,
+        is_active: true 
+      },
+      order: [['created_at', 'DESC']]
+    });
+    
+    const restaurant = await Restaurant.findByPk(restaurantId);
+    
+    let message = `👥 <b>Пользователи ресторана "${restaurant.name}"</b>\n\n`;
+    
+    if (users.length === 0) {
+      message += 'Нет активных пользователей';
+    } else {
+      users.forEach((user, index) => {
+        const roleEmoji = {
+          'restaurant': '🍽️',
+          'manager': '💼',
+          'buyer': '🛒',
+          'admin': '👑'
+        };
+        
+        message += `${index + 1}. ${roleEmoji[user.role] || '👤'} ${user.first_name || ''} ${user.last_name || ''}\n`;
+        message += `   @${user.username || 'нет username'} (ID: ${user.telegram_id})\n`;
+        message += `   Роль: ${user.role}\n`;
+        message += `   /user_${user.id}\n\n`;
+      });
+    }
+    
+    const keyboard = {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🔙 Назад к ресторану', callback_data: `manager_restaurant:${restaurantId}` }]
+        ]
+      }
+    };
+    
+    if (ctx.callbackQuery) {
+      await ctx.editMessageText(message, { parse_mode: 'HTML', ...keyboard });
+    } else {
+      await ctx.reply(message, { parse_mode: 'HTML', ...keyboard });
+    }
+  } catch (error) {
+    logger.error('Error in showRestaurantUsers:', error);
+    ctx.reply('❌ Ошибка при загрузке списка пользователей');
+  }
+};
+
 // Статистика
 const statistics = async (ctx) => {
   try {
@@ -495,7 +563,8 @@ const handleTextCommands = async (ctx) => {
       // Создаем новый ресторан
       const restaurant = await Restaurant.create({
         name: restaurantName,
-        is_active: true
+        is_active: true,
+        created_by: ctx.user.id
       });
       
       // Создаем главный филиал
@@ -544,6 +613,8 @@ const handleTextCommands = async (ctx) => {
       return restaurantsList(ctx);
     case '📊 Статистика':
       return statistics(ctx);
+    case '🔧 Настройка расписания':
+      return scheduleList(ctx);
     case '📑 Сводка заказов':
       return consolidatedOrdersList(ctx);
     case '💰 Рентабельность':
@@ -671,8 +742,14 @@ const restaurantsList = async (ctx) => {
     
     const { RestaurantBranch } = require('../database/models');
     
+    // Для админов показываем все рестораны, для менеджеров только их
+    const whereCondition = { is_active: true };
+    if (ctx.user.role === 'manager') {
+      whereCondition.created_by = ctx.user.id;
+    }
+    
     const restaurants = await Restaurant.findAll({
-      where: { is_active: true },
+      where: whereCondition,
       include: [
         {
           model: User,
@@ -745,11 +822,35 @@ const ordersSubmenu = async (ctx) => {
     const { RegistrationRequest } = require('../database/models');
     
     // Подсчитываем количество заявок
-    const [newOrdersCount, processingCount, registrationCount] = await Promise.all([
-      Order.count({ where: { status: 'sent' } }),
-      Order.count({ where: { status: 'processing', processed_by: ctx.user.id } }),
-      RegistrationRequest.count({ where: { status: 'pending' } })
-    ]);
+    let newOrdersCount, processingCount, registrationCount, purchasedCount;
+    
+    if (ctx.user.role === 'manager') {
+      // Для менеджеров считаем только заказы из их ресторанов
+      const managerRestaurants = await Restaurant.findAll({
+        where: { created_by: ctx.user.id },
+        attributes: ['id']
+      });
+      const restaurantIds = managerRestaurants.map(r => r.id);
+      
+      [newOrdersCount, processingCount, registrationCount, purchasedCount] = await Promise.all([
+        restaurantIds.length > 0 
+          ? Order.count({ where: { status: 'sent', restaurant_id: restaurantIds } })
+          : 0,
+        Order.count({ where: { status: 'processing', processed_by: ctx.user.id } }),
+        RegistrationRequest.count({ where: { status: 'pending' } }),
+        restaurantIds.length > 0 
+          ? Order.count({ where: { status: 'purchased', restaurant_id: restaurantIds } })
+          : 0
+      ]);
+    } else {
+      // Для админов показываем все
+      [newOrdersCount, processingCount, registrationCount, purchasedCount] = await Promise.all([
+        Order.count({ where: { status: 'sent' } }),
+        Order.count({ where: { status: 'processing', processed_by: ctx.user.id } }),
+        RegistrationRequest.count({ where: { status: 'pending' } }),
+        Order.count({ where: { status: 'purchased' } })
+      ]);
+    }
     
     let message = '📋 <b>Управление заявками</b>\n\n';
     
@@ -758,6 +859,9 @@ const ordersSubmenu = async (ctx) => {
     }
     if (processingCount > 0) {
       message += `⏳ В обработке: ${processingCount}\n`;
+    }
+    if (purchasedCount > 0) {
+      message += `💰 Заказов после закупки: ${purchasedCount}\n`;
     }
     if (registrationCount > 0) {
       message += `👥 Заявок на регистрацию: ${registrationCount}\n`;
@@ -769,7 +873,7 @@ const ordersSubmenu = async (ctx) => {
       reply_markup: {
         inline_keyboard: [
           [
-            { text: `📥 Новые заявки${newOrdersCount > 0 ? ` (${newOrdersCount})` : ''}`, callback_data: 'orders_new' }
+            { text: `📥 Новые заявки${newOrdersCount + purchasedCount > 0 ? ` (${newOrdersCount + purchasedCount})` : ''}`, callback_data: 'orders_new' }
           ],
           [
             { text: '📊 Консолидированный список', callback_data: 'manager_consolidated' }
@@ -792,6 +896,43 @@ const ordersSubmenu = async (ctx) => {
   } catch (error) {
     logger.error('Error in ordersSubmenu:', error);
     ctx.reply('❌ Произошла ошибка при загрузке меню заявок');
+  }
+};
+
+// Список расписаний
+const scheduleList = async (ctx) => {
+  try {
+    // Для менеджеров показываем только их рестораны
+    const whereCondition = ctx.user.role === 'manager' 
+      ? { created_by: ctx.user.id, is_active: true }
+      : { is_active: true };
+      
+    const restaurants = await Restaurant.findAll({
+      where: whereCondition,
+      order: [['name', 'ASC']]
+    });
+    
+    if (restaurants.length === 0) {
+      return ctx.reply('📋 У вас нет ресторанов для настройки расписания');
+    }
+    
+    let message = '🔧 <b>Настройка расписания отправки заказов</b>\n\n';
+    message += 'Выберите ресторан для настройки расписания:\n\n';
+    
+    const keyboard = {
+      reply_markup: {
+        inline_keyboard: restaurants.map(r => 
+          [{ text: `🏢 ${r.name}`, callback_data: `manager_restaurant_schedule:${r.id}` }]
+        ).concat([
+          [{ text: '🔙 Назад', callback_data: 'menu_back' }]
+        ])
+      }
+    };
+    
+    await ctx.reply(message, { parse_mode: 'HTML', ...keyboard });
+  } catch (error) {
+    logger.error('Error in scheduleList:', error);
+    ctx.reply('❌ Ошибка при загрузке списка ресторанов');
   }
 };
 
@@ -919,6 +1060,13 @@ const handleManagerCallbacks = async (ctx) => {
       const restaurantId = parseInt(action.split(':')[1]);
       await ctx.answerCbQuery();
       return manageRestaurantSchedule(ctx, restaurantId);
+    }
+    
+    // Пользователи ресторана
+    if (action.startsWith('manager_restaurant_users:')) {
+      const restaurantId = parseInt(action.split(':')[1]);
+      await ctx.answerCbQuery();
+      return showRestaurantUsers(ctx, restaurantId);
     }
     
     // Добавление расписания
@@ -1302,7 +1450,7 @@ const consolidatedOrders = async (ctx) => {
     
     const orders = await Order.findAll({
       where: {
-        order_date: {
+        created_at: {
           [Op.gte]: yesterday
         },
         status: ['new', 'processed', 'sent'] // Все активные статусы
@@ -1310,22 +1458,14 @@ const consolidatedOrders = async (ctx) => {
       include: [
         {
           model: OrderItem,
-          as: 'orderItems',
-          include: [{
-            model: NomenclatureCache,
-            as: 'product'
-          }]
+          as: 'orderItems'
         },
         {
           model: Restaurant,
           as: 'restaurant'
-        },
-        {
-          model: RestaurantBranch,
-          as: 'branch'
         }
       ],
-      order: [['order_date', 'DESC']]
+      order: [['created_at', 'DESC']]
     });
     
     if (orders.length === 0) {
@@ -1512,11 +1652,11 @@ const consolidatedOrdersList = async (ctx) => {
   try {
     await ctx.answerCbQuery();
     
-    // Получаем консолидированные заказы только обработанные менеджером
-    const consolidated = await OrderService.getConsolidatedOrders(null, null, true);
+    // Используем OrderService для получения консолидированных заказов
+    const consolidated = await OrderService.getConsolidatedOrders();
     
     if (consolidated.length === 0) {
-      return ctx.reply('📋 Нет обработанных заказов для консолидации');
+      return ctx.reply('📋 Нет заказов для консолидации');
     }
     
     let message = '📊 <b>Консолидированный список обработанных заказов</b>\n\n';
@@ -1544,7 +1684,13 @@ const consolidatedOrdersList = async (ctx) => {
       message += `<b>📂 ${category}</b>\n`;
       
       items.forEach(item => {
-        message += `• <b>${item.product_name}</b>: ${item.total_quantity} ${item.unit}`;
+        // Добавляем техническую пометку к названию, если она есть
+        let productName = item.product_name;
+        if (item.technical_note) {
+          productName += ` (${item.technical_note})`;
+        }
+        
+        message += `• <b>${productName}</b>: ${item.total_quantity} ${item.unit}`;
         
         if (item.orders_count > 1) {
           message += ` (из ${item.orders_count} заказов)`;
@@ -1582,6 +1728,44 @@ const consolidatedOrdersList = async (ctx) => {
   }
 };
 
+// Обработка заказов после закупки
+const processPurchasedOrders = async (ctx) => {
+  try {
+    const orders = await Order.findAll({
+      where: { status: 'purchased' },
+      include: [
+        { model: OrderItem, as: 'orderItems' },
+        { model: Restaurant, as: 'restaurant' },
+        { model: User, as: 'user' }
+      ],
+      order: [['created_at', 'ASC']]
+    });
+    
+    if (orders.length === 0) {
+      return ctx.reply('📋 Нет заказов для обработки');
+    }
+    
+    let message = '✅ <b>Заказы после закупки</b>\n\n';
+    message += 'Необходимо установить отпускные цены для ресторанов:\n';
+    
+    orders.forEach(order => {
+      message += `\n🏢 ${order.restaurant.name}\n`;
+      message += `📋 Заказ #${order.order_number}\n`;
+      message += `👤 ${order.user.first_name || order.user.username}\n`;
+      message += `📦 Позиций: ${order.orderItems.length}\n`;
+      message += `/process_order_${order.id}\n`;
+    });
+    
+    message += '\n💡 Нажмите на команду под заказом для начала обработки';
+    
+    await ctx.reply(message, { parse_mode: 'HTML' });
+    
+  } catch (error) {
+    logger.error('Error in processPurchasedOrders:', error);
+    ctx.reply('❌ Произошла ошибка при получении заказов');
+  }
+};
+
 module.exports = {
   menu,
   pendingOrders,
@@ -1596,6 +1780,7 @@ module.exports = {
   processedOrders,
   restaurantsList,
   ordersSubmenu,
+  scheduleList,
   manageRestaurant,
   manageRestaurantSchedule,
   showScheduleDetails,
@@ -1603,5 +1788,6 @@ module.exports = {
   showEditRestaurantMenu,
   consolidatedOrders,
   consolidatedOrdersList,
-  exportConsolidated
+  exportConsolidated,
+  processPurchasedOrders
 };

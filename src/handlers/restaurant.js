@@ -125,7 +125,7 @@ const myOrders = async (ctx) => {
       
       let message = '📋 <b>Текущий заказ:</b>\n';
       if (draft.branch) {
-        message += `📍 Филиал: ${draft.branch.address}\n`;
+        message += `📍 Филиал: ${draft.branch.name || draft.branch.address}\n`;
       }
       message += `📅 Отправка: ${formatInTimezone(draft.scheduled_for)}\n\n`;
       
@@ -174,7 +174,7 @@ const myOrders = async (ctx) => {
       
       drafts.forEach((draft, index) => {
         const itemCount = draft.draftOrderItems ? draft.draftOrderItems.length : 0;
-        const branchName = draft.branch ? draft.branch.address : 'Без филиала';
+        const branchName = draft.branch ? (draft.branch.name || draft.branch.address) : 'Без филиала';
         const scheduledTime = formatInTimezone(draft.scheduled_for, 'DD.MM HH:mm');
         
         message += `${index + 1}. 📍 ${branchName}\n`;
