@@ -513,7 +513,7 @@ const handleProductText = async (ctx) => {
             // Логируем suggestions для отладки
             logger.info('Creating keyboard for suggestions:', {
               suggestionsCount: suggestions.length,
-              firstSuggestion: suggestions[0],
+              allSuggestions: suggestions.map(s => ({ id: s.id, name: s.product_name, unit: s.unit })),
               tempId
             });
             
@@ -525,13 +525,23 @@ const handleProductText = async (ctx) => {
                     logger.error('Invalid suggestion:', suggestion);
                     return null;
                   }
+                  // Особая обработка для дубликатов
+                  const text = suggestion.isDuplicate 
+                    ? `➕ Добавить к ${suggestion.product_name} (${suggestion.unit})`
+                    : `✓ ${suggestion.product_name} (${suggestion.unit})`;
+                  
                   return [{
-                    text: `✓ ${suggestion.product_name} (${suggestion.unit})`,
+                    text: text,
                     callback_data: `temp_match:${tempId}:${suggestion.id}`
                   }];
                 }).filter(Boolean)
               }
             };
+            
+            logger.info('Created keyboard buttons:', {
+              buttonsCount: keyboard.reply_markup.inline_keyboard.length,
+              buttons: keyboard.reply_markup.inline_keyboard.map(row => row[0].text)
+            });
             
             await ctx.reply(
               `❓ <b>Продукт "${parsed.name}" не найден в каталоге</b>\n\n` +

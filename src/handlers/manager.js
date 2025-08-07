@@ -43,6 +43,7 @@ const pendingOrders = async (ctx) => {
     }
 
     let message = '📥 <b>Новые заявки:</b>\n\n';
+    message += '💡 <i>Обработка заявок доступна только после завершения закупки</i>\n\n';
     
     // Группируем по ресторанам
     const ordersByRestaurant = {};
@@ -69,8 +70,20 @@ const pendingOrders = async (ctx) => {
         message += `\n${statusIcon} Заказ #${order.order_number} (${time})${statusText}\n`;
         message += `👤 ${order.user.first_name || order.user.username}\n`;
         message += `📦 Позиций: ${order.orderItems.length}\n`;
+        
+        // Показываем позиции для заказов в статусе 'sent'
+        if (order.status === 'sent' && order.orderItems && order.orderItems.length > 0) {
+          order.orderItems.forEach(item => {
+            message += `  • ${item.product_name} - ${item.quantity} ${item.unit}\n`;
+          });
+        }
+        
         message += `💰 Сумма: ${order.total_amount || 'не указана'} ₽\n`;
-        message += `✏️ Обработать: /process_order_${order.id}\n`;
+        
+        // Команда обработки только для заказов после закупки (статус 'purchased')
+        if (order.status === 'purchased') {
+          message += `✏️ Обработать: /process_order_${order.id}\n`;
+        }
       });
     });
 

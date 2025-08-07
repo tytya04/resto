@@ -1,5 +1,6 @@
 const { Scenes, Markup } = require('telegraf');
 const { Order, OrderItem, Restaurant, Purchase } = require('../database/models');
+const { Op } = require('sequelize');
 const OrderService = require('../services/OrderService');
 const logger = require('../utils/logger');
 const moment = require('moment');
@@ -12,6 +13,12 @@ purchaseScene.enter(async (ctx) => {
   const consolidatedProductId = ctx.scene.state.consolidatedProductId;
   const consolidatedProduct = ctx.scene.state.consolidatedProduct;
   
+  logger.info('Purchase scene entered:', {
+    userId: ctx.user?.id,
+    consolidatedProductId,
+    hasProduct: !!consolidatedProduct
+  });
+  
   if (!consolidatedProductId || !consolidatedProduct) {
     await ctx.reply('❌ Ошибка: не указан продукт для закупки');
     return ctx.scene.leave();
@@ -21,7 +28,7 @@ purchaseScene.enter(async (ctx) => {
   const existingPurchase = await Purchase.findOne({
     where: {
       consolidated_product_id: consolidatedProductId,
-      status: ['pending', 'partial']
+      status: { [Op.in]: ['pending', 'partial'] }
     }
   });
   
@@ -87,10 +94,20 @@ async function showProductInfo(ctx) {
 purchaseScene.action('start_purchase', async (ctx) => {
   await ctx.answerCbQuery();
   
+  logger.info('Starting purchase creation:', {
+    userId: ctx.user?.id,
+    product: ctx.scene.session.consolidatedProduct?.product_name
+  });
+  
   try {
     // Создаем запись о закупке
     const product = ctx.scene.session.consolidatedProduct;
     const purchase = await OrderService.createPurchaseFromConsolidated(product, ctx.user.id);
+    
+    logger.info('Purchase created successfully:', {
+      purchaseId: purchase.id,
+      productName: product.product_name
+    });
     
     ctx.scene.session.purchase = purchase;
     ctx.scene.session.step = 'enter_quantity';
@@ -307,9 +324,15 @@ async function completePurchase(ctx) {
 purchaseScene.action('cancel_purchase', async (ctx) => {
   await ctx.answerCbQuery();
   
-  // Если закупка была создана, удаляем её
+  // Если закупка была создана, удаляем её и связанные PurchaseItem
   if (ctx.scene.session.purchase) {
     try {
+      const { PurchaseItem } = require('../database/models');
+      // Сначала удаляем PurchaseItem
+      await PurchaseItem.destroy({
+        where: { purchase_id: ctx.scene.session.purchase.id }
+      });
+      // Затем удаляем Purchase
       await Purchase.destroy({
         where: { id: ctx.scene.session.purchase.id }
       });

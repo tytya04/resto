@@ -261,6 +261,41 @@ class OrderService {
     return orderItem;
   }
 
+  // Обновление цен после закупки (для менеджеров)
+  static async updateOrderItemPrice(orderId, itemId, price) {
+    const order = await Order.findByPk(orderId);
+    
+    if (!order) {
+      throw new Error('Order not found');
+    }
+    
+    // Разрешаем обновление цен для статусов purchased и processing
+    if (order.status !== 'purchased' && order.status !== 'processing') {
+      throw new Error('Цены можно устанавливать только для заказов после закупки');
+    }
+    
+    const orderItem = await OrderItem.findOne({
+      where: {
+        id: itemId,
+        order_id: orderId
+      }
+    });
+
+    if (!orderItem) {
+      throw new Error('Order item not found');
+    }
+
+    // Обновляем цену и пересчитываем сумму
+    orderItem.price = price;
+    orderItem.total = orderItem.quantity * price;
+    await orderItem.save();
+
+    // Пересчитываем общую сумму заказа
+    await this.recalculateOrderTotal(orderId);
+
+    return orderItem;
+  }
+
   // Пересчет общей суммы заказа
   static async recalculateOrderTotal(orderId) {
     const items = await OrderItem.findAll({
@@ -397,10 +432,14 @@ class OrderService {
     orders.forEach(order => {
       order.orderItems.forEach(item => {
         const key = `${item.product_name}_${item.unit}`;
+        // Создаем короткий безопасный ID для Telegram callback_data (максимум 64 байта)
+        const crypto = require('crypto');
+        const safeId = crypto.createHash('md5').update(key).digest('hex').substring(0, 30);
         
         if (!consolidated[key]) {
           consolidated[key] = {
-            consolidated_product_id: key,
+            consolidated_product_id: safeId,
+            original_key: key,
             product_name: item.product_name,
             unit: item.unit,
             category: item.category,
@@ -464,25 +503,19 @@ class OrderService {
 
   // Получение активных закупок
   static async getActivePurchases() {
-    return Purchase.findAll({
+    const { PurchaseItem } = require('../database/models');
+    return PurchaseItem.findAll({
       where: {
-        status: {
-          [Op.in]: ['pending', 'partial']
-        }
+        status: 'pending'
       },
-      include: [
-        {
-          model: User,
-          as: 'buyer',
-          attributes: ['id', 'first_name', 'last_name', 'username']
-        }
-      ],
-      order: [['purchase_date', 'DESC']]
+      order: [['created_at', 'DESC']]
     });
   }
 
   // Создание закупки из консолидированного списка
   static async createPurchaseFromConsolidated(consolidatedProduct, buyerId) {
+    const transaction = await Purchase.sequelize.transaction();
+    
     try {
       const purchase = await Purchase.create({
         consolidated_product_id: consolidatedProduct.consolidated_product_id,
@@ -492,12 +525,27 @@ class OrderService {
         buyer_id: buyerId,
         orders_data: consolidatedProduct.orders,
         status: 'pending'
-      });
+      }, { transaction });
 
+      // Создаем PurchaseItem для отслеживания активных закупок
+      const { PurchaseItem } = require('../database/models');
+      await PurchaseItem.create({
+        purchase_id: purchase.id,
+        product_name: consolidatedProduct.product_name,
+        unit: consolidatedProduct.unit,
+        quantity: consolidatedProduct.total_quantity,
+        required_quantity: consolidatedProduct.total_quantity,
+        consolidated_product_id: consolidatedProduct.consolidated_product_id,
+        status: 'pending'
+      }, { transaction });
+
+      await transaction.commit();
+      
       logger.info(`Purchase created for ${consolidatedProduct.product_name}: ${consolidatedProduct.total_quantity} ${consolidatedProduct.unit}`);
       
       return purchase;
     } catch (error) {
+      await transaction.rollback();
       logger.error('Error creating purchase:', error);
       throw error;
     }
@@ -522,6 +570,21 @@ class OrderService {
       purchase.notes = actualData.notes;
       
       await purchase.save({ transaction });
+
+      // Обновляем соответствующий PurchaseItem
+      const { PurchaseItem } = require('../database/models');
+      await PurchaseItem.update(
+        {
+          purchased_quantity: actualData.quantity,
+          purchase_price: actualData.totalPrice,
+          status: 'completed',
+          purchased_at: new Date()
+        },
+        {
+          where: { purchase_id: purchaseId },
+          transaction
+        }
+      );
 
       // Распределяем цены по заказам
       const allocations = purchase.allocatePriceToOrders();

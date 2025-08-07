@@ -329,7 +329,57 @@ class DraftOrderService {
                 newQuantity: parsed.quantity
               });
               
-              // Если продукт уже есть, добавляем в дубликаты
+              // Проверяем альтернативные варианты даже при дубликате
+              const suggestions = await productMatcher.suggestProducts(parsed.name, 10);
+              const baseProductName = potentialMatch.product_name.toLowerCase();
+              const alternativeVariants = suggestions.filter(s => {
+                if (s.id === potentialMatch.id) return false;
+                
+                const variantName = s.product_name.toLowerCase();
+                const isRelated = variantName.includes(baseProductName.split(' ')[0]) || 
+                                baseProductName.includes(variantName.split(' ')[0]);
+                
+                return isRelated && s.score < 0.5;
+              });
+              
+              // Если есть альтернативы, предлагаем их вместе с информацией о дубликате
+              if (alternativeVariants.length > 0) {
+                logger.info('Found alternatives for duplicate product:', {
+                  duplicate: potentialMatch.product_name,
+                  alternatives: alternativeVariants.map(a => a.product_name)
+                });
+                
+                // Создаем список всех вариантов, включая текущий дубликат
+                const allVariants = [
+                  {
+                    id: potentialMatch.id,
+                    product_name: potentialMatch.product_name + ' (уже в заказе)',
+                    category: potentialMatch.category,
+                    unit: potentialMatch.unit,
+                    last_purchase_price: potentialMatch.last_purchase_price,
+                    score: 0,
+                    match_type: 'duplicate',
+                    matched_term: potentialMatch.product_name,
+                    isDuplicate: true,
+                    existingQuantity: existingItem.quantity
+                  },
+                  ...alternativeVariants
+                ];
+                
+                // Добавляем в нераспознанные с предложениями выбора
+                results.unmatched.push({
+                  line,
+                  parsed: {
+                    name: parsed.name,
+                    quantity: parsed.quantity,
+                    unit: parsed.unit
+                  },
+                  suggestions: allVariants
+                });
+                continue;
+              }
+              
+              // Если альтернатив нет, обрабатываем как обычный дубликат
               results.duplicates = results.duplicates || [];
               results.duplicates.push({
                 existing: existingItem,
@@ -942,9 +992,13 @@ class DraftOrderService {
 
       await transaction.commit();
       
-      // Отправляем уведомления менеджерам
+      // Отправляем уведомления менеджерам и закупщикам
       const { notificationService } = require('./NotificationService');
       await notificationService.notifyManagers(order, draftOrder);
+      
+      // Уведомляем закупщиков о новом заказе
+      const OrderSchedulerService = require('./OrderSchedulerService');
+      await OrderSchedulerService.notifyBuyersAboutNewOrders([order]);
       
       return order;
     } catch (error) {

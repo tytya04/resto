@@ -377,11 +377,10 @@ class OrderSchedulerService {
       message += '\n\n📊 Заказы отправлены закупщикам для консолидации\n';
       message += '💡 Вы сможете обработать заказы после завершения закупки';
       
-      // Добавляем кнопки для просмотра
+      // Добавляем кнопку для просмотра консолидированного списка
       const keyboard = {
         reply_markup: {
           inline_keyboard: [
-            [{ text: '📋 Просмотреть заказы', callback_data: 'pending_orders' }],
             [{ text: '📊 Консолидированный список', callback_data: 'manager_consolidated' }]
           ]
         }
@@ -403,11 +402,18 @@ class OrderSchedulerService {
   // Уведомление закупщиков о новых заказах
   async notifyBuyersAboutNewOrders(orders) {
     try {
+      logger.info(`Starting notification to buyers about ${orders.length} new orders`);
+      
       const buyers = await User.findAll({
         where: { role: 'buyer' }
       });
       
-      if (buyers.length === 0) return;
+      logger.info(`Found ${buyers.length} buyers in database`);
+      
+      if (buyers.length === 0) {
+        logger.warn('No buyers found to notify');
+        return;
+      }
       
       // Получаем детальную информацию о заказах
       const { Order, OrderItem } = require('../database/models');
@@ -449,7 +455,9 @@ class OrderSchedulerService {
       
       // Отправляем уведомление каждому закупщику
       for (const buyer of buyers) {
+        logger.info(`Sending notification to buyer: ${buyer.username || buyer.id} (${buyer.telegram_id})`);
         await notificationService.sendToTelegramId(buyer.telegram_id, message, { parse_mode: 'HTML' });
+        logger.info(`Successfully sent notification to buyer: ${buyer.username || buyer.id}`);
       }
       
       logger.info(`Notified ${buyers.length} buyers about ${orders.length} new orders`);

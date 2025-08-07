@@ -32,7 +32,10 @@ processOrderScene.enter(async (ctx) => {
       orderId: order.id,
       orderNumber: order.order_number,
       itemsCount: order.orderItems ? order.orderItems.length : 0,
-      status: order.status
+      status: order.status,
+      hasUser: !!order.user,
+      userId: order.user?.id,
+      userTelegramId: order.user?.telegram_id
     });
     
     // Для continue_process разрешаем обработку заказов в статусе processing
@@ -56,10 +59,11 @@ processOrderScene.enter(async (ctx) => {
       await OrderService.updateOrderStatus(orderId, 'processing', ctx.user.id);
     }
     
-    // Сохраняем данные заказа в сессии сцены
+    // Сохраняем данные заказа и пользователя в сессии сцены
     ctx.scene.session.order = order;
     ctx.scene.session.currentItemIndex = 0;
     ctx.scene.session.editedItems = [];
+    ctx.scene.session.managerId = ctx.user.id; // Сохраняем ID менеджера
     
     // Начинаем обработку позиций
     await showOrderItem(ctx);
@@ -130,13 +134,35 @@ async function showOrderItem(ctx) {
     currentPrice,
     suggestedPrice,
     hasKeyboard: !!keyboard,
-    buttonsCount: buttons.length
+    buttonsCount: buttons.length,
+    hasCallbackQuery: !!ctx.callbackQuery,
+    hasUpdateMessage: !!(ctx.update && ctx.update.message)
   });
   
-  await ctx.reply(message, { 
-    parse_mode: 'HTML',
-    reply_markup: keyboard.reply_markup
-  });
+  // Проверяем, можем ли мы редактировать сообщение
+  // Редактировать можем только если есть callbackQuery (нажата inline кнопка)
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(message, { 
+        parse_mode: 'HTML',
+        reply_markup: keyboard.reply_markup
+      });
+    } catch (error) {
+      // Если не удалось отредактировать (например, сообщение было удалено),
+      // отправляем новое
+      logger.warn('Failed to edit message, sending new one:', error.message);
+      await ctx.reply(message, { 
+        parse_mode: 'HTML',
+        reply_markup: keyboard.reply_markup
+      });
+    }
+  } else {
+    // Если это обычное сообщение или команда, отправляем новое сообщение
+    await ctx.reply(message, { 
+      parse_mode: 'HTML',
+      reply_markup: keyboard.reply_markup
+    });
+  }
 }
 
 // Обработчик изменения цены
@@ -241,10 +267,30 @@ async function showOrderSummary(ctx) {
     Markup.button.callback('🚫 Отменить обработку', 'cancel_processing')
   ]);
   
-  await ctx.editMessageText(message, { 
-    parse_mode: 'HTML',
-    reply_markup: Markup.inlineKeyboard(keyboard).reply_markup
-  });
+  // Проверяем, можем ли мы редактировать сообщение
+  // Редактировать можем только если есть callbackQuery (нажата inline кнопка)
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(message, { 
+        parse_mode: 'HTML',
+        reply_markup: Markup.inlineKeyboard(keyboard).reply_markup
+      });
+    } catch (error) {
+      // Если не удалось отредактировать (например, сообщение было удалено),
+      // отправляем новое
+      logger.warn('Failed to edit summary message, sending new one:', error.message);
+      await ctx.reply(message, { 
+        parse_mode: 'HTML',
+        reply_markup: Markup.inlineKeyboard(keyboard).reply_markup
+      });
+    }
+  } else {
+    // Если это обычное сообщение или команда, отправляем новое сообщение
+    await ctx.reply(message, { 
+      parse_mode: 'HTML',
+      reply_markup: Markup.inlineKeyboard(keyboard).reply_markup
+    });
+  }
 }
 
 // Обработчик ввода цены
@@ -322,28 +368,72 @@ processOrderScene.action('add_comment', async (ctx) => {
 processOrderScene.action('approve_order', async (ctx) => {
   await ctx.answerCbQuery();
   
-  const { order, editedItems, managerComment } = ctx.scene.session;
+  const { order, editedItems, managerComment, managerId } = ctx.scene.session;
+  
+  // Проверяем наличие order в сессии
+  if (!order || !order.id) {
+    logger.error('Order not found in session:', { 
+      hasOrder: !!order, 
+      orderId: order?.id,
+      sessionKeys: Object.keys(ctx.scene.session || {})
+    });
+    await ctx.reply('❌ Ошибка: данные заказа не найдены. Пожалуйста, начните обработку заново.');
+    return ctx.scene.leave();
+  }
   
   try {
-    // Обновляем цены в базе данных
+    // Обновляем цены в базе данных (используем специальный метод для заказов после закупки)
     for (let i = 0; i < order.orderItems.length; i++) {
       const editedItem = editedItems[i];
-      if (editedItem) {
-        await OrderService.updateOrderItem(order.id, order.orderItems[i].id, {
-          price: editedItem.price,
-          total: editedItem.total
+      const orderItem = order.orderItems[i];
+      
+      if (!orderItem || !orderItem.id) {
+        logger.error('Order item missing or invalid:', {
+          index: i,
+          hasOrderItem: !!orderItem,
+          orderItemId: orderItem?.id,
+          orderItemsLength: order.orderItems.length
         });
+        continue;
+      }
+      
+      if (editedItem && editedItem.price) {
+        // Используем метод updateOrderItemPrice для заказов со статусом purchased
+        await OrderService.updateOrderItemPrice(order.id, orderItem.id, editedItem.price);
         
         // Сохраняем цену в историю
-        const orderItem = order.orderItems[i];
         orderItem.price = editedItem.price;
         orderItem.total = editedItem.total;
         await PriceHistory.createFromOrderItem(orderItem, order, 'sale');
       }
     }
     
+    // Проверяем order еще раз перед обновлением статуса
+    if (!order || !order.id) {
+      logger.error('Order lost before status update:', {
+        hasOrder: !!order,
+        orderId: order?.id,
+        orderKeys: order ? Object.keys(order) : 'order is null'
+      });
+      throw new Error('Order data lost during processing');
+    }
+    
+    // Проверяем наличие managerId
+    if (!managerId) {
+      logger.error('Manager ID not found in session:', {
+        managerId: managerId,
+        sessionKeys: Object.keys(ctx.scene.session || {})
+      });
+      throw new Error('Manager ID lost during processing');
+    }
+    
     // Обновляем статус заказа
-    await OrderService.updateOrderStatus(order.id, 'approved', ctx.user.id);
+    logger.info('About to update order status:', {
+      orderId: order.id,
+      managerId: managerId,
+      hasOrder: !!order
+    });
+    await OrderService.updateOrderStatus(order.id, 'approved', managerId);
     
     // Сохраняем комментарий менеджера
     if (managerComment) {
@@ -353,14 +443,25 @@ processOrderScene.action('approve_order', async (ctx) => {
       );
     }
     
-    // Отправляем уведомление ресторану
-    await notificationService.sendToTelegramId(
-      order.user.telegram_id,
-      `✅ <b>Ваш заказ #${order.order_number} подтвержден!</b>\n\n` +
-      `💰 Сумма: ${order.total_amount} ₽\n` +
+    // Перезагружаем заказ для получения связанных данных
+    const updatedOrder = await OrderService.getOrderById(order.id);
+    
+    // Вычисляем итоговую сумму
+    let totalAmount = 0;
+    if (updatedOrder && updatedOrder.orderItems) {
+      totalAmount = updatedOrder.orderItems.reduce((sum, item) => sum + (item.total || 0), 0);
+    }
+    
+    // Отправляем уведомление ресторану (проверяем наличие user)
+    if (updatedOrder && updatedOrder.user && updatedOrder.user.telegram_id) {
+      await notificationService.sendToTelegramId(
+        updatedOrder.user.telegram_id,
+        `✅ <b>Ваш заказ #${updatedOrder.order_number} подтвержден!</b>\n\n` +
+      `💰 Сумма: ${totalAmount.toFixed(2)} ₽\n` +
       (managerComment ? `\n💬 Комментарий менеджера: ${managerComment}` : ''),
       { parse_mode: 'HTML' }
-    );
+      );
+    }
     
     const keyboard = Markup.inlineKeyboard([
       [Markup.button.callback('📄 Создать ТОРГ-12', `generate_torg12_after:${order.id}`)],
@@ -547,6 +648,7 @@ processOrderScene.leave(async (ctx) => {
   delete ctx.scene.session.awaitingRejectionReason;
   delete ctx.scene.session.managerComment;
   delete ctx.scene.session.rejectionReason;
+  delete ctx.scene.session.managerId;
 });
 
 module.exports = processOrderScene;

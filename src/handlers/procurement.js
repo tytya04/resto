@@ -29,10 +29,14 @@ const menu = async (ctx) => {
 // Консолидированный список для закупки
 const consolidatedList = async (ctx) => {
   try {
+    logger.info('consolidatedList called by user:', ctx.user.id);
+    
     // Получаем консолидированные заказы
     const consolidated = await OrderService.getConsolidatedOrders();
+    logger.info('Consolidated orders found:', consolidated.length);
     
     if (consolidated.length === 0) {
+      logger.warn('No consolidated orders found');
       return ctx.reply('📋 Нет заказов для консолидации');
     }
     
@@ -143,12 +147,11 @@ const activePurchases = async (ctx) => {
     
     logger.info('activePurchases called', { userId: ctx.user.id, role: ctx.user.role });
     
-    // Проверяем есть ли активная закупка (включая этап сборки)
+    // Проверяем есть ли активная закупка для данного пользователя
     const activePurchase = await Purchase.findOne({
       where: {
         buyer_id: ctx.user.id,
-        status: ['pending', 'in_progress', 'packing'],
-        product_name: 'Закупочная сессия' // Фильтруем только закупочные сессии
+        status: { [Op.in]: ['pending', 'partial', 'in_progress'] }
       }
     });
     
@@ -208,27 +211,26 @@ const showActivePurchase = async (ctx, purchase) => {
   try {
     // Получаем детали закупки
     const purchaseItems = await PurchaseItem.findAll({
-      where: { purchase_id: purchase.id },
-      order: [['status', 'ASC'], ['product_name', 'ASC']]
+      where: { 
+        purchase_id: purchase.id,
+        status: 'pending'
+      },
+      order: [['product_name', 'ASC']]
     });
     
     let message = '🛒 <b>Активная закупка</b>\n\n';
     message += `📅 Начата: ${formatInTimezone(purchase.created_at)}\n`;
-    message += `📊 Статус: ${purchase.status === 'in_progress' ? 'В процессе' : 'Ожидает начала'}\n\n`;
+    message += `📊 Статус: Ожидает закупки\n\n`;
     
-    const pendingItems = purchaseItems.filter(item => item.status === 'pending');
-    const completedItems = purchaseItems.filter(item => item.status === 'completed');
+    message += `📦 К закупке: ${purchaseItems.length}\n\n`;
     
-    message += `✅ Закуплено: ${completedItems.length}\n`;
-    message += `⏳ Осталось: ${pendingItems.length}\n\n`;
-    
-    if (pendingItems.length > 0) {
-      message += '<b>Следующие товары:</b>\n';
-      pendingItems.slice(0, 5).forEach(item => {
+    if (purchaseItems.length > 0) {
+      message += '<b>Товары для закупки:</b>\n';
+      purchaseItems.slice(0, 5).forEach(item => {
         message += `• ${item.product_name} - ${item.quantity} ${item.unit}\n`;
       });
-      if (pendingItems.length > 5) {
-        message += `...и еще ${pendingItems.length - 5} товаров\n`;
+      if (purchaseItems.length > 5) {
+        message += `...и еще ${purchaseItems.length - 5} товаров\n`;
       }
     }
     
@@ -255,44 +257,51 @@ const showActivePurchase = async (ctx, purchase) => {
 // Завершенные закупки
 const completedPurchases = async (ctx) => {
   try {
+    // Получаем завершенные закупки из таблицы purchases
     const purchases = await Purchase.findAll({
       where: { 
         status: 'completed',
         purchase_date: {
           [Op.gte]: moment().subtract(30, 'days').toDate()
-        }
+        },
+        buyer_id: ctx.user.id // Показываем только закупки текущего пользователя
       },
-      include: [
-        {
-          model: User,
-          as: 'buyer',
-          attributes: ['id', 'first_name', 'last_name', 'username']
-        }
-      ],
+      include: [{
+        model: User,
+        as: 'buyer',
+        attributes: ['first_name', 'username']
+      }],
       order: [['purchase_date', 'DESC']],
-      limit: 20
+      limit: 50
     });
     
     if (purchases.length === 0) {
       return ctx.reply('📋 Нет завершенных закупок за последние 30 дней');
     }
     
-    let message = '✅ <b>Завершенные закупки</b>\n';
+    let message = '✅ <b>Завершенные закупки</b>\n\n';
     let totalSum = 0;
+    let totalCount = 0;
     
-    purchases.forEach(purchase => {
-      const date = moment(purchase.purchase_date).format('DD.MM.YYYY');
+    // Выводим закупки
+    purchases.forEach((purchase, index) => {
+      const date = moment(purchase.purchase_date).format('DD.MM.YYYY HH:mm');
+      const purchaseTotal = parseFloat(purchase.total_price || 0);
       
-      message += `\n📦 ${purchase.product_name}\n`;
-      message += `   📏 ${purchase.purchased_quantity} ${purchase.unit}\n`;
-      message += `   💰 ${purchase.total_price} ₽ (${purchase.unit_price} ₽/${purchase.unit})\n`;
-      message += `   👤 ${purchase.buyer?.first_name || purchase.buyer?.username}\n`;
+      message += `${index + 1}. <b>${purchase.product_name}</b>\n`;
       message += `   📅 ${date}\n`;
+      message += `   📦 ${purchase.purchased_quantity} ${purchase.unit}\n`;
+      message += `   💰 ${purchaseTotal.toFixed(2)} ₽`;
+      if (purchase.unit_price) {
+        message += ` (${parseFloat(purchase.unit_price).toFixed(2)} ₽/${purchase.unit})`;
+      }
+      message += '\n\n';
       
-      totalSum += parseFloat(purchase.total_price || 0);
+      totalSum += purchaseTotal;
+      totalCount++;
     });
     
-    message += `\n💰 <b>Итого за период: ${totalSum.toFixed(2)} ₽</b>`;
+    message += `💰 <b>Итого: ${totalCount} закупок на ${totalSum.toFixed(2)} ₽</b>`;
     
     await ctx.reply(message, { parse_mode: 'HTML' });
     
@@ -313,32 +322,34 @@ const purchaseStatistics = async (ctx) => {
     const { sequelize } = require('../database/models');
     
     // Статистика за сегодня
-    const todayStats = await Purchase.findOne({
+    const todayPurchases = await Purchase.findAll({
       where: {
         purchase_date: {
           [Op.gte]: today
         },
-        status: 'completed'
+        status: 'completed',
+        buyer_id: ctx.user.id
       },
-      attributes: [
-        [sequelize.fn('COUNT', 'id'), 'count'],
-        [sequelize.fn('SUM', sequelize.col('total_price')), 'total']
-      ]
+      attributes: ['total_price']
     });
     
+    const todayCount = todayPurchases.length;
+    const todayTotal = todayPurchases.reduce((sum, p) => sum + parseFloat(p.total_price || 0), 0);
+    
     // Статистика за месяц
-    const monthStats = await Purchase.findOne({
+    const monthPurchases = await Purchase.findAll({
       where: {
         purchase_date: {
           [Op.gte]: monthStart
         },
-        status: 'completed'
+        status: 'completed',
+        buyer_id: ctx.user.id
       },
-      attributes: [
-        [sequelize.fn('COUNT', 'id'), 'count'],
-        [sequelize.fn('SUM', sequelize.col('total_price')), 'total']
-      ]
+      attributes: ['total_price']
     });
+    
+    const monthCount = monthPurchases.length;
+    const monthTotal = monthPurchases.reduce((sum, p) => sum + parseFloat(p.total_price || 0), 0);
     
     // Топ продуктов по количеству закупок
     const topProducts = await Purchase.findAll({
@@ -346,7 +357,8 @@ const purchaseStatistics = async (ctx) => {
         purchase_date: {
           [Op.gte]: monthStart
         },
-        status: 'completed'
+        status: 'completed',
+        buyer_id: ctx.user.id
       },
       attributes: [
         'product_name',
@@ -363,21 +375,24 @@ const purchaseStatistics = async (ctx) => {
     let message = '📊 <b>Статистика закупок</b>\n\n';
     
     message += '📅 <b>Сегодня:</b>\n';
-    const todayData = todayStats?.get({ plain: true }) || { count: 0, total: 0 };
-    message += `Закупок: ${todayData.count}\n`;
-    message += `Сумма: ${parseFloat(todayData.total || 0).toFixed(2)} ₽\n\n`;
+    message += `Закупок: ${todayCount}\n`;
+    message += `Сумма: ${todayTotal.toFixed(2)} ₽\n\n`;
     
     message += '📅 <b>За текущий месяц:</b>\n';
-    const monthData = monthStats?.get({ plain: true }) || { count: 0, total: 0 };
-    message += `Закупок: ${monthData.count}\n`;
-    message += `Сумма: ${parseFloat(monthData.total || 0).toFixed(2)} ₽\n\n`;
+    message += `Закупок: ${monthCount}\n`;
+    message += `Сумма: ${monthTotal.toFixed(2)} ₽\n\n`;
     
     if (topProducts.length > 0) {
       message += '🏆 <b>Топ продуктов за месяц:</b>\n';
       topProducts.forEach((product, index) => {
         const data = product.get({ plain: true });
-        message += `${index + 1}. ${data.product_name}\n`;
-        message += `   📦 ${data.total_quantity} ${data.unit} | 💰 ${parseFloat(data.total_price).toFixed(2)} ₽\n`;
+        const avgPrice = data.total_price && data.total_quantity > 0 
+          ? (parseFloat(data.total_price) / parseFloat(data.total_quantity)).toFixed(2)
+          : '0.00';
+        message += `${index + 1}. <b>${data.product_name}</b>\n`;
+        message += `   📦 ${parseFloat(data.total_quantity || 0).toFixed(2)} ${data.unit} | `;
+        message += `💰 ${parseFloat(data.total_price || 0).toFixed(2)} ₽ | `;
+        message += `📊 ${avgPrice} ₽/${data.unit}\n`;
       });
     }
     
@@ -533,12 +548,11 @@ const purchases = async (ctx) => {
       await ctx.answerCbQuery();
     }
     
-    // Считаем активные закупки (включая этап сборки)
+    // Считаем активные закупки для данного пользователя
     const activePurchasesCount = await Purchase.count({
       where: {
         buyer_id: ctx.user.id,
-        status: ['pending', 'in_progress', 'packing'],
-        product_name: 'Закупочная сессия'
+        status: { [Op.in]: ['pending', 'partial', 'in_progress'] }
       }
     });
     
@@ -547,8 +561,7 @@ const purchases = async (ctx) => {
       where: {
         buyer_id: ctx.user.id,
         status: 'completed',
-        product_name: 'Закупочная сессия',
-        created_at: {
+        purchase_date: {
           [Op.gte]: moment().subtract(30, 'days').toDate()
         }
       }
@@ -626,7 +639,7 @@ const startPurchaseSession = async (ctx) => {
     const existingPurchase = await Purchase.findOne({
       where: {
         buyer_id: ctx.user.id,
-        status: ['pending', 'in_progress'],
+        status: { [Op.in]: ['pending', 'partial'] },
         product_name: 'Закупочная сессия'
       }
     });
@@ -705,7 +718,7 @@ const continuePurchaseSession = async (ctx) => {
     const purchase = await Purchase.findOne({
       where: {
         buyer_id: ctx.user.id,
-        status: ['pending', 'in_progress'],
+        status: { [Op.in]: ['pending', 'in_progress'] },
         product_name: 'Закупочная сессия'
       }
     });
