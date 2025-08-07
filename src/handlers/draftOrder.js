@@ -486,16 +486,24 @@ const handleProductText = async (ctx) => {
 
     // Показываем нераспознанные с предложениями
     if (results.unmatched.length > 0) {
-      message += '❓ <b>Требуется уточнение:</b>\n';
-      message += '<i>Эти продукты не найдены в каталоге. Выберите существующий продукт из списка или удалите позицию.</i>\n';
+      // Сначала отправляем сводное сообщение
+      let summaryMessage = '❓ <b>Требуется уточнение:</b>\n';
+      summaryMessage += '<i>Эти продукты не найдены в каталоге. Выберите существующий продукт из списка или удалите позицию.</i>\n';
       
-      for (const { item, suggestions, line, parsed } of results.unmatched) {
-        // Если item не создан (например, при unit clarification с вариантами)
+      for (const { item, parsed, line } of results.unmatched) {
+        // Добавляем краткую информацию о ненайденных продуктах в сводное сообщение
         if (!item) {
-          message += `\n"${parsed?.name || line}" - ${parsed?.quantity || ''} ${parsed?.unit || ''}\n`;
+          summaryMessage += `\n"${parsed?.name || line}" - ${parsed?.quantity || ''} ${parsed?.unit || ''}`;
         } else {
-          message += `\n"${item.original_name}" - ${item.quantity} ${item.unit}\n`;
+          summaryMessage += `\n"${item.original_name}" - ${item.quantity} ${item.unit}`;
         }
+      }
+      
+      // Отправляем сводное сообщение
+      await ctx.reply(summaryMessage, { parse_mode: 'HTML' });
+      
+      // Затем отправляем индивидуальные сообщения для каждого ненайденного продукта
+      for (const { item, suggestions, line, parsed } of results.unmatched) {
         
         if (suggestions.length > 0) {
           // Если item не создан, используем временный подход через сессию
@@ -679,8 +687,20 @@ const confirmProductMatch = async (ctx) => {
     
     const item = await draftOrderService.confirmProductMatch(itemId, productId);
     
+    const keyboard = {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '➕ Добавить еще продукты', callback_data: 'draft_add_more' }],
+          [{ text: '🔍 Поиск в каталоге', callback_data: 'draft_search' }],
+          [{ text: '📋 Посмотреть текущий заказ', callback_data: 'draft_view' }],
+          [{ text: '❌ Отмена', callback_data: 'draft_cancel' }]
+        ]
+      }
+    };
+    
     await ctx.editMessageText(
-      `✅ Подтверждено: ${item.product_name} - ${item.quantity} ${item.unit}`
+      `✅ Подтверждено: ${item.product_name} - ${item.quantity} ${item.unit}`,
+      { parse_mode: 'HTML', ...keyboard }
     );
   } catch (error) {
     logger.error('Error confirming product match:', error);

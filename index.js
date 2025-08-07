@@ -1123,18 +1123,25 @@ bot.action(/^temp_match:(.+):(\d+)$/, requireRole('restaurant'), async (ctx) => 
     // Отвечаем на callback query
     await ctx.answerCbQuery('✅ Продукт подтвержден');
     
-    // Обновляем сообщение
+    // Обновляем сообщение с кнопками
+    const keyboard = {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '➕ Добавить еще продукты', callback_data: 'draft_add_more' }],
+          [{ text: '🔍 Поиск в каталоге', callback_data: 'draft_search' }],
+          [{ text: '📋 Посмотреть текущий заказ', callback_data: 'draft_view' }],
+          [{ text: '❌ Отмена', callback_data: 'draft_cancel' }]
+        ]
+      }
+    };
+    
     await ctx.editMessageText(
-      `✅ Подтверждено: ${updatedItem.product_name} - ${updatedItem.quantity} ${updatedItem.unit}`
+      `✅ Подтверждено: ${updatedItem.product_name} - ${updatedItem.quantity} ${updatedItem.unit}`,
+      { parse_mode: 'HTML', ...keyboard }
     );
     
     // Удаляем временные данные
     delete ctx.session.tempProducts[tempId];
-    
-    // Через секунду показываем обновленный черновик
-    setTimeout(() => {
-      draftOrderHandlers.viewDraft(ctx);
-    }, 1000);
   } catch (error) {
     logger.error('Error in temp_match handler:', error);
     await ctx.answerCbQuery('❌ Произошла ошибка');
