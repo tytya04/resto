@@ -11,6 +11,8 @@ const Purchase = require('./Purchase');
 const PurchaseItem = require('./PurchaseItem');
 const PriceHistory = require('./PriceHistory');
 const ScheduledOrder = require('./ScheduledOrder');
+const BotSession = require('./BotSession');
+const Supplier = require('./Supplier');
 
 // Инициализируем модели, которые определены как функции
 const DraftOrder = require('./DraftOrder')(sequelize);
@@ -224,5 +226,7 @@ module.exports = {
   PriceHistory,
   ScheduledOrder,
   DraftOrder,
-  DraftOrderItem
+  DraftOrderItem,
+  BotSession,
+  Supplier
 };

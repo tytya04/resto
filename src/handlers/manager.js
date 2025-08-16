@@ -14,21 +14,31 @@ const menu = async (ctx) => {
     text: ctx.message?.text,
     callbackData: ctx.callbackQuery?.data
   });
-  const keyboard = Markup.keyboard([
-    ['📋 Заявки', '👥 Управление пользователями'],
-    ['🏢 Рестораны', '📊 Статистика'],
-    ['🔧 Настройка расписания', '📑 Сводка заказов'],
-    ['💰 Рентабельность', '📈 Обновить цены'],
-    ['📧 Email настройки', '⚙️ Настройки'],
-    ['🔙 Главное меню']
-  ]).resize();
+  // Используем inline клавиатуру
+  const keyboard = {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '📋 Заявки', callback_data: 'menu_orders' }],
+        [{ text: '👥 Управление пользователями', callback_data: 'admin_users' }],
+        [{ text: '🏢 Рестораны', callback_data: 'menu_restaurants' }],
+        [{ text: '🏭 Данные поставщика', callback_data: 'edit_supplier_menu' }],
+        [{ text: '📄 Документы', callback_data: 'documents_menu' }],
+        [{ text: '📊 Статистика', callback_data: 'manager_statistics' }],
+        [{ text: '🔧 Настройка расписания', callback_data: 'manager_schedule' }],
+        [{ text: '📑 Сводка заказов', callback_data: 'manager_order_summary' }],
+        [{ text: '💰 Рентабельность', callback_data: 'manager_profitability' }],
+        [{ text: '📈 Обновить цены', callback_data: 'manager_update_prices' }],
+        [{ text: '📧 Email настройки', callback_data: 'manager_email_settings' }]
+      ]
+    }
+  };
 
   await ctx.reply(
     '👔 <b>Меню менеджера</b>\n\n' +
     'Выберите раздел для работы:',
     { 
-      reply_markup: keyboard,
-      parse_mode: 'HTML' 
+      parse_mode: 'HTML',
+      ...keyboard
     }
   );
 };
@@ -974,11 +984,20 @@ const manageRestaurant = async (ctx, restaurantId) => {
     }
     
     let message = `🏢 <b>${restaurant.name}</b>\n\n`;
-    message += `<b>Информация:</b>\n`;
+    message += `<b>Основная информация:</b>\n`;
+    message += `🏢 Юр. название: ${restaurant.legal_name || 'не указано'}\n`;
     message += `📍 Адрес: ${restaurant.address || 'не указан'}\n`;
     message += `📞 Телефон: ${restaurant.contact_phone || 'не указан'}\n`;
     message += `📧 Email: ${restaurant.contact_email || 'не указан'}\n`;
     message += `👤 Контактное лицо: ${restaurant.contact_person || 'не указано'}\n\n`;
+    
+    message += `<b>Реквизиты:</b>\n`;
+    message += `🆔 ИНН: ${restaurant.inn || 'не указан'}\n`;
+    message += `🔢 КПП: ${restaurant.kpp || 'не указан'}\n`;
+    message += `🏦 Банк: ${restaurant.bank_name || 'не указан'}\n`;
+    message += `💳 Р/с: ${restaurant.bank_account || 'не указан'}\n`;
+    message += `👨‍💼 Директор: ${restaurant.director_name || 'не указан'}\n`;
+    message += `👩‍💼 Гл. бухгалтер: ${restaurant.accountant_name || 'не указан'}\n\n`;
     
     message += `<b>Статистика:</b>\n`;
     message += `👥 Пользователей: ${restaurant.users?.length || 0}\n`;
@@ -1336,10 +1355,8 @@ const handleManagerCallbacks = async (ctx) => {
       const restaurantId = parseInt(action.split(':')[1]);
       await ctx.answerCbQuery();
       
-      ctx.session = ctx.session || {};
-      ctx.session.editingRestaurantId = restaurantId;
-      
-      return showEditRestaurantMenu(ctx, restaurantId);
+      // Используем современную сцену редактирования с полными реквизитами
+      return ctx.scene.enter('edit_restaurant', { restaurantId });
     }
     
     // Обработка редактирования полей ресторана

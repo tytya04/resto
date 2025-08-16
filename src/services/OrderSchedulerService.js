@@ -16,8 +16,11 @@ class OrderSchedulerService {
     try {
       logger.info('Initializing OrderSchedulerService...');
       
-      // Получаем все рестораны
-      const restaurants = await Restaurant.findAll({ where: { is_active: true } });
+      // Получаем все рестораны (только основные поля)
+      const restaurants = await Restaurant.findAll({ 
+        where: { is_active: true },
+        attributes: ['id', 'name', 'is_active']
+      });
       
       for (const restaurant of restaurants) {
         await this.scheduleRestaurantOrders(restaurant.id);

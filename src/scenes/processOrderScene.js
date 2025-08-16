@@ -463,20 +463,53 @@ processOrderScene.action('approve_order', async (ctx) => {
       );
     }
     
-    const keyboard = Markup.inlineKeyboard([
-      [Markup.button.callback('📄 Создать ТОРГ-12', `generate_torg12_after:${order.id}`)],
-      [Markup.button.callback('✅ Готово', 'done')]
-    ]);
+    // Проверяем наличие других необработанных заказов
+    const pendingOrders = await Order.findAll({
+      where: { 
+        status: 'sent',
+        '$restaurant.is_active$': true
+      },
+      include: [
+        { model: Restaurant, as: 'restaurant' },
+        { model: User, as: 'user' }
+      ],
+      order: [['created_at', 'ASC']]
+    });
     
-    await ctx.editMessageText(
-      `✅ <b>Заказ #${order.order_number} успешно подтвержден!</b>\n\n` +
-      `Уведомление отправлено в ресторан.\n\n` +
-      `Хотите сгенерировать документы?`,
-      { 
-        parse_mode: 'HTML',
-        reply_markup: keyboard.reply_markup
-      }
-    );
+    logger.info('Checking for pending orders:', { count: pendingOrders.length });
+    
+    const buttons = [
+      [Markup.button.callback('📄 Создать ТОРГ-12', `generate_torg12_after:${order.id}`)]
+    ];
+    
+    // Если есть еще необработанные заказы, добавляем кнопку для обработки следующего
+    if (pendingOrders.length > 0) {
+      const nextOrder = pendingOrders[0];
+      buttons.push([
+        Markup.button.callback(
+          `📋 Обработать следующий заказ (#${nextOrder.order_number})`, 
+          `process_next_order:${nextOrder.id}`
+        )
+      ]);
+    }
+    
+    buttons.push([Markup.button.callback('✅ Готово', 'done')]);
+    
+    const keyboard = Markup.inlineKeyboard(buttons);
+    
+    let message = `✅ <b>Заказ #${order.order_number} успешно подтвержден!</b>\n\n` +
+                  `Уведомление отправлено в ресторан.\n\n`;
+    
+    if (pendingOrders.length > 0) {
+      message += `📌 <b>Осталось обработать заказов: ${pendingOrders.length}</b>\n\n`;
+    }
+    
+    message += `Хотите сгенерировать документы?`;
+    
+    await ctx.editMessageText(message, { 
+      parse_mode: 'HTML',
+      reply_markup: keyboard.reply_markup
+    });
     
     return ctx.scene.leave();
     
@@ -538,12 +571,42 @@ async function rejectOrder(ctx) {
       { parse_mode: 'HTML' }
     );
     
-    await ctx.reply(
-      `❌ <b>Заказ #${order.order_number} отклонен</b>\n\n` +
-      `Причина: ${rejectionReason}\n\n` +
-      `Уведомление отправлено в ресторан.`,
-      { parse_mode: 'HTML' }
-    );
+    // Проверяем наличие других необработанных заказов
+    const pendingOrders = await Order.findAll({
+      where: { 
+        status: 'sent',
+        '$restaurant.is_active$': true
+      },
+      include: [
+        { model: Restaurant, as: 'restaurant' },
+        { model: User, as: 'user' }
+      ],
+      order: [['created_at', 'ASC']]
+    });
+    
+    let message = `❌ <b>Заказ #${order.order_number} отклонен</b>\n\n` +
+                  `Причина: ${rejectionReason}\n\n` +
+                  `Уведомление отправлено в ресторан.`;
+    
+    if (pendingOrders.length > 0) {
+      message += `\n\n📌 <b>Осталось обработать заказов: ${pendingOrders.length}</b>`;
+      
+      const nextOrder = pendingOrders[0];
+      const keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback(
+          `📋 Обработать следующий заказ (#${nextOrder.order_number})`, 
+          `process_next_order:${nextOrder.id}`
+        )],
+        [Markup.button.callback('✅ Готово', 'done')]
+      ]);
+      
+      await ctx.reply(message, { 
+        parse_mode: 'HTML',
+        reply_markup: keyboard.reply_markup
+      });
+    } else {
+      await ctx.reply(message, { parse_mode: 'HTML' });
+    }
     
     return ctx.scene.leave();
     
@@ -614,17 +677,38 @@ processOrderScene.action('show_summary', async (ctx) => {
   await showOrderSummary(ctx);
 });
 
-// Генерация ТОРГ-12 после подтверждения
-processOrderScene.action(/^generate_torg12_after:(\d+)$/, async (ctx) => {
+// Обработка следующего заказа
+processOrderScene.action(/^process_next_order:(\d+)$/, async (ctx) => {
   await ctx.answerCbQuery();
   const orderId = parseInt(ctx.match[1]);
   
-  // Покидаем сцену и вызываем команду генерации
-  await ctx.scene.leave();
-  ctx.message = { text: `/generate_torg12_${orderId}` };
+  logger.info('Processing next order:', { orderId });
   
-  const documentsHandlers = require('../handlers/documents');
-  return documentsHandlers.generateTorg12Command(ctx);
+  // Покидаем текущую сцену и запускаем обработку следующего заказа
+  await ctx.scene.leave();
+  
+  // Входим в сцену обработки заказа с новым ID
+  await ctx.scene.enter('process_order', { orderId });
+});
+
+// Генерация ТОРГ-12 после подтверждения
+processOrderScene.action(/^generate_torg12_after:(\d+)$/, async (ctx) => {
+  try {
+    await ctx.answerCbQuery('Генерируем ТОРГ-12...');
+    const orderId = parseInt(ctx.match[1]);
+    
+    logger.info('Generating TORG-12 from scene', { orderId, userId: ctx.user?.id });
+    
+    // Покидаем сцену и вызываем команду генерации
+    await ctx.scene.leave();
+    ctx.message = { text: `/generate_torg12_${orderId}` };
+    
+    const documentsHandlers = require('../handlers/documents');
+    return documentsHandlers.generateTorg12Command(ctx);
+  } catch (error) {
+    logger.error('Error in generate_torg12_after handler:', error);
+    await ctx.reply('❌ Ошибка при генерации ТОРГ-12');
+  }
 });
 
 // Завершение без генерации документов

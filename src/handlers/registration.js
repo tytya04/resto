@@ -9,6 +9,11 @@ const registrationReminders = new Map();
 // Обработчик команды /start
 const startCommand = async (ctx) => {
   try {
+    // Принудительно выходим из любой сцены
+    if (ctx.scene && ctx.scene.current) {
+      await ctx.scene.leave();
+    }
+    
     const telegramId = ctx.from.id;
     const username = ctx.from.username;
     const firstName = ctx.from.first_name;
@@ -390,6 +395,8 @@ const showMainMenu = async (ctx, user) => {
       [Markup.button.callback('📋 Заявки', 'menu_orders')],
       [Markup.button.callback('👥 Управление пользователями', 'admin_users')],
       [Markup.button.callback('🏢 Рестораны', 'menu_restaurants')],
+      [Markup.button.callback('🏭 Данные поставщика', 'edit_supplier_menu')],
+      [Markup.button.callback('📄 Документы', 'documents_menu')],
       [Markup.button.callback('📊 Статистика', 'manager_statistics')],
       [Markup.button.callback('👤 Профиль', 'menu_profile')]
     ],
@@ -397,6 +404,15 @@ const showMainMenu = async (ctx, user) => {
       [Markup.button.callback('📊 Консолидация', 'menu_consolidation')],
       [Markup.button.callback('🛒 Закупки', 'menu_purchases')],
       [Markup.button.callback('📈 Отчеты', 'menu_reports')],
+      [Markup.button.callback('👤 Профиль', 'menu_profile')]
+    ],
+    'admin': [
+      [Markup.button.callback('🔧 Панель администратора', 'admin_panel')],
+      [Markup.button.callback('👥 Управление пользователями', 'admin_users')],
+      [Markup.button.callback('🏢 Управление ресторанами', 'admin_restaurants')],
+      [Markup.button.callback('🏭 Данные поставщика', 'edit_supplier_menu')],
+      [Markup.button.callback('⚙️ Настройки системы', 'admin_settings')],
+      [Markup.button.callback('📊 Статистика', 'admin_stats')],
       [Markup.button.callback('👤 Профиль', 'menu_profile')]
     ]
   };

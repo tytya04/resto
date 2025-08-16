@@ -115,6 +115,11 @@ const Order = sequelize.define('orders', {
     set(value) {
       this.setDataValue('items_json', JSON.stringify(value));
     }
+  },
+  torg12_generated: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false,
+    allowNull: false
   }
 }, {
   indexes: [

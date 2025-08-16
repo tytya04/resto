@@ -81,6 +81,52 @@ const Restaurant = sequelize.define('restaurants', {
     type: DataTypes.STRING(100),
     allowNull: true
   },
+  // Дополнительные реквизиты для ТОРГ-12 (временно отключены)
+  /*
+  okpo: {
+    type: DataTypes.STRING(10),
+    allowNull: true,
+    comment: 'Код по ОКПО'
+  },
+  okdp: {
+    type: DataTypes.STRING(10),
+    allowNull: true,
+    comment: 'Код вида деятельности по ОКДП'
+  },
+  postal_address: {
+    type: DataTypes.TEXT,
+    allowNull: true,
+    comment: 'Почтовый адрес (может отличаться от юридического)'
+  },
+  fax: {
+    type: DataTypes.STRING(20),
+    allowNull: true,
+    comment: 'Факс'
+  },
+  director_position: {
+    type: DataTypes.STRING(100),
+    allowNull: true,
+    defaultValue: 'Генеральный директор',
+    comment: 'Должность руководителя'
+  },
+  accountant_position: {
+    type: DataTypes.STRING(100),
+    allowNull: true,
+    defaultValue: 'Главный бухгалтер',
+    comment: 'Должность главного бухгалтера'
+  },
+  warehouse_responsible: {
+    type: DataTypes.STRING(200),
+    allowNull: true,
+    comment: 'Ответственное лицо склада'
+  },
+  warehouse_position: {
+    type: DataTypes.STRING(100),
+    allowNull: true,
+    defaultValue: 'Заведующий складом',
+    comment: 'Должность ответственного лица склада'
+  },
+  */
   created_by: {
     type: DataTypes.INTEGER,
     allowNull: true,

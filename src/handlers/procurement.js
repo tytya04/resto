@@ -148,11 +148,13 @@ const activePurchases = async (ctx) => {
     logger.info('activePurchases called', { userId: ctx.user.id, role: ctx.user.role });
     
     // Проверяем есть ли активная закупка для данного пользователя
+    // Включаем как отдельные закупки, так и закупочные сессии
     const activePurchase = await Purchase.findOne({
       where: {
         buyer_id: ctx.user.id,
         status: { [Op.in]: ['pending', 'partial', 'in_progress'] }
-      }
+      },
+      order: [['created_at', 'DESC']] // Берем самую свежую
     });
     
     logger.info('Active purchase found:', { 
@@ -290,10 +292,17 @@ const completedPurchases = async (ctx) => {
       
       message += `${index + 1}. <b>${purchase.product_name}</b>\n`;
       message += `   📅 ${date}\n`;
-      message += `   📦 ${purchase.purchased_quantity} ${purchase.unit}\n`;
-      message += `   💰 ${purchaseTotal.toFixed(2)} ₽`;
-      if (purchase.unit_price) {
-        message += ` (${parseFloat(purchase.unit_price).toFixed(2)} ₽/${purchase.unit})`;
+      
+      // Для закупочных сессий показываем количество позиций и общую сумму
+      if (purchase.product_name === 'Закупочная сессия') {
+        message += `   📦 ${purchase.purchased_quantity || 0} позиций\n`;
+        message += `   💰 ${purchaseTotal.toFixed(2)} ₽`;
+      } else {
+        message += `   📦 ${purchase.purchased_quantity} ${purchase.unit}\n`;
+        message += `   💰 ${purchaseTotal.toFixed(2)} ₽`;
+        if (purchase.unit_price) {
+          message += ` (${parseFloat(purchase.unit_price).toFixed(2)} ₽/${purchase.unit})`;
+        }
       }
       message += '\n\n';
       
@@ -1118,8 +1127,37 @@ const finishAllPacking = async (ctx) => {
       return ctx.reply('❌ Не все заказы собраны. Пожалуйста, соберите все корзины перед завершением.');
     }
     
-    // Обновляем статус закупки на completed
-    await purchase.update({ status: 'completed' });
+    // Вычисляем итоговые суммы и количества из всех заказов
+    let totalPrice = 0;
+    let totalItems = 0;
+    
+    const purchasedOrders = await Order.findAll({
+      where: { 
+        status: 'purchased',
+        packing_status: 'ready'
+      },
+      include: [
+        { model: OrderItem, as: 'orderItems' }
+      ]
+    });
+    
+    // Подсчитываем общую сумму и количество товаров
+    for (const order of purchasedOrders) {
+      for (const item of order.orderItems) {
+        if (item.price && item.quantity) {
+          totalPrice += parseFloat(item.price) * parseFloat(item.quantity);
+          totalItems += parseFloat(item.quantity);
+        }
+      }
+    }
+    
+    // Обновляем статус закупки и сохраняем статистику
+    await purchase.update({ 
+      status: 'completed',
+      total_price: totalPrice,
+      purchased_quantity: totalItems,
+      unit_price: totalItems > 0 ? (totalPrice / totalItems) : 0
+    });
     
     // Получаем все собранные заказы
     const orders = await Order.findAll({

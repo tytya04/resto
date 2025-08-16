@@ -40,6 +40,7 @@ const addAdminScene = require('./src/scenes/addAdminScene');
 const addRestaurantScene = require('./src/scenes/addRestaurantScene');
 const editRestaurantScene = require('./src/scenes/editRestaurantScene');
 const addScheduleScene = require('./src/scenes/addScheduleScene');
+const editSupplierScene = require('./src/scenes/editSupplierScene');
 
 const bot = new Telegraf(config.botToken);
 logger.info('Bot instance created successfully');
@@ -58,7 +59,8 @@ const stage = new Scenes.Stage([
   wrapScene(addAdminScene),
   wrapScene(addRestaurantScene),
   wrapScene(editRestaurantScene),
-  wrapScene(addScheduleScene)
+  wrapScene(addScheduleScene),
+  wrapScene(editSupplierScene)
 ]);
 
 // Для graceful shutdown
@@ -110,12 +112,11 @@ Promise.all([
   process.exit(1);
 });
 
-// Session middleware для хранения данных пользователя
-bot.use(session({
-  getSessionKey: (ctx) => {
-    if (!ctx.from) return null;
-    return `${ctx.from.id}`;
-  }
+// Session middleware для хранения данных пользователя (персистентный)
+const sqliteSession = require('./src/middleware/sqliteSession');
+bot.use(sqliteSession({
+  ttl: 24 * 60 * 60 * 1000, // 24 часа
+  cleanupInterval: 60 * 60 * 1000 // Очистка каждый час
 }));
 bot.use(stage.middleware());
 
@@ -307,7 +308,10 @@ bot.command('help', async (ctx) => {
             { text: '🏢 Управление ресторанами', callback_data: 'admin_restaurants' }
           ],
           [
-            { text: '⚙️ Настройки системы', callback_data: 'admin_settings' },
+            { text: '🏭 Данные поставщика', callback_data: 'edit_supplier_menu' },
+            { text: '⚙️ Настройки системы', callback_data: 'admin_settings' }
+          ],
+          [
             { text: '📊 Статистика', callback_data: 'admin_stats' }
           ],
           [
@@ -1010,7 +1014,6 @@ bot.action(/^process_order:(\d+)$/, requireRole('manager'), async (ctx) => {
 
 // Команды для работы с документами
 bot.command(/^generate_torg12_\d+$/, documentsHandlers.generateTorg12Command);
-bot.command(/^order_documents_\d+$/, documentsHandlers.listOrderDocuments);
 bot.command('documents_menu', documentsHandlers.documentsMenu);
 
 // Команды для аналитики и отчетности
@@ -1036,11 +1039,48 @@ bot.command(/^restaurant_(\d+)$/, requireAdmin, async (ctx) => {
 });
 bot.command('logs', requireAdmin, adminHandlers.viewLogs);
 
-// Обработчики callback для документов
-bot.action(/^send_doc_email:(.+):(.+)$/, documentsHandlers.sendDocumentByEmail);
-bot.action(/^delete_doc:(.+)$/, documentsHandlers.deleteDocument);
-bot.action(/^quick_torg12:(\d+)$/, documentsHandlers.quickGenerateTorg12);
-bot.action('cleanup_old_docs', documentsHandlers.cleanupOldDocuments);
+// Обработчики callback для документов (пока закомментированы - функции не реализованы)
+// bot.action(/^send_doc_email:(.+):(.+)$/, documentsHandlers.sendDocumentByEmail);
+// bot.action(/^delete_doc:(.+)$/, documentsHandlers.deleteDocument);
+// bot.action(/^quick_torg12:(\d+)$/, documentsHandlers.quickGenerateTorg12);
+
+// Новые обработчики для интерфейса документов
+bot.action('doc_torg12_by_order', requireRole(['manager', 'buyer']), documentsHandlers.selectOrderForTorg12);
+bot.action(/^generate_torg12:(\d+)$/, requireRole(['manager', 'buyer']), documentsHandlers.generateTorg12Callback);
+bot.action(/^generate_torg12_after:(\d+)$/, requireRole(['manager', 'buyer']), async (ctx) => {
+  try {
+    await ctx.answerCbQuery('Генерируем ТОРГ-12...');
+    const orderId = parseInt(ctx.match[1]);
+    
+    logger.info('Generating TORG-12 from global handler', { 
+      orderId, 
+      userId: ctx.user?.id,
+      originalCallback: ctx.callbackQuery?.data 
+    });
+    
+    // Вызываем обработчик напрямую, он теперь умеет извлекать ID из callback_query
+    return documentsHandlers.generateTorg12Command(ctx);
+  } catch (error) {
+    logger.error('Error in global generate_torg12_after handler:', error);
+    await ctx.reply('❌ Ошибка при генерации ТОРГ-12');
+  }
+});
+bot.action('documents_menu', requireRole(['manager', 'buyer']), documentsHandlers.documentsMenu);
+
+// Обработчики для ТОРГ-12 workflow
+bot.action(/^torg12_complete:(\d+)$/, requireRole(['manager', 'buyer']), documentsHandlers.handleTorg12Complete);
+bot.action('torg12_finish', requireRole(['manager', 'buyer']), documentsHandlers.handleTorg12Finish);
+
+// Обработчик для редактирования данных поставщика
+bot.action('edit_supplier_menu', requireRole(['admin', 'manager']), async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+    ctx.scene.enter('edit_supplier');
+  } catch (error) {
+    logger.error('Error entering supplier edit scene:', error);
+    await ctx.reply('❌ Ошибка при входе в режим редактирования поставщика');
+  }
+});
 
 // Обработчики callback для аналитики
 bot.action('confirm_update_prices', analyticsHandlers.handleAnalyticsCallbacks);
@@ -1230,6 +1270,8 @@ bot.hears('📋 Меню менеджера', requireRole('manager'), async (ctx
         [{ text: '📋 Заявки', callback_data: 'menu_orders' }],
         [{ text: '👥 Управление пользователями', callback_data: 'admin_users' }],
         [{ text: '🏢 Рестораны', callback_data: 'menu_restaurants' }],
+        [{ text: '🏭 Данные поставщика', callback_data: 'edit_supplier_menu' }],
+        [{ text: '📄 Документы', callback_data: 'documents_menu' }],
         [{ text: '📊 Статистика', callback_data: 'manager_statistics' }],
         [{ text: '📧 Email настройки', callback_data: 'manager_email_settings' }]
       ]
@@ -1752,7 +1794,10 @@ bot.on('text', async (ctx) => {
             { text: '🏢 Управление ресторанами', callback_data: 'admin_restaurants' }
           ],
           [
-            { text: '⚙️ Настройки системы', callback_data: 'admin_settings' },
+            { text: '🏭 Данные поставщика', callback_data: 'edit_supplier_menu' },
+            { text: '⚙️ Настройки системы', callback_data: 'admin_settings' }
+          ],
+          [
             { text: '📊 Статистика', callback_data: 'admin_stats' }
           ],
           [
@@ -1877,7 +1922,10 @@ bot.on('text', async (ctx) => {
             { text: '🏢 Управление ресторанами', callback_data: 'admin_restaurants' }
           ],
           [
-            { text: '⚙️ Настройки системы', callback_data: 'admin_settings' },
+            { text: '🏭 Данные поставщика', callback_data: 'edit_supplier_menu' },
+            { text: '⚙️ Настройки системы', callback_data: 'admin_settings' }
+          ],
+          [
             { text: '📊 Статистика', callback_data: 'admin_stats' }
           ],
           [

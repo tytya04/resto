@@ -18,11 +18,14 @@ const adminPanel = async (ctx) => {
             { text: '🏢 Управление ресторанами', callback_data: 'admin_restaurants' }
           ],
           [
-            { text: '⚙️ Настройки системы', callback_data: 'admin_settings' },
-            { text: '📊 Статистика', callback_data: 'admin_stats' }
+            { text: '🏭 Данные поставщика', callback_data: 'edit_supplier_menu' },
+            { text: '⚙️ Настройки системы', callback_data: 'admin_settings' }
           ],
           [
-            { text: '💾 Резервная копия БД', callback_data: 'admin_backup' },
+            { text: '📊 Статистика', callback_data: 'admin_stats' },
+            { text: '💾 Резервная копия БД', callback_data: 'admin_backup' }
+          ],
+          [
             { text: '📋 Логи системы', callback_data: 'admin_logs' }
           ]
         ]
@@ -1376,8 +1379,8 @@ const handleAdminCallbacks = async (ctx) => {
     if (action.startsWith('admin_restaurant_edit_')) {
       const restaurantId = parseInt(action.split('_')[3]);
       await ctx.answerCbQuery();
-      ctx.scene.state.restaurantId = restaurantId;
-      return ctx.scene.enter('edit_restaurant');
+      logger.info('Starting restaurant edit scene', { restaurantId, action });
+      return ctx.scene.enter('edit_restaurant', { restaurantId });
     }
     
     // Переключение активности ресторана
